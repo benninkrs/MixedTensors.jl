@@ -1,5 +1,6 @@
 using MultiMatrices
 using BenchmarkTools
+using LinearAlgebra: I, tr
 using Test
 
 A = MultiMatrix(reshape(1.0:24, (1,2,3,4)))
@@ -13,10 +14,10 @@ BB = MultiMatrix(rand(6,5,4,3,5,4,3,2))
 @test A*B == C
 @test_throws DimensionMismatch A*B(2,1)
 @test A(9,5)*B(9,5) == C(9,5)
-@test size(A + B') = (1,2,3,4)
-@test R * inv($) ≈ MultiMatrix(reshape(I(6), (2,3,2,3)))
+@test size(A + B') == (1,2,3,4)
+@test R * inv(R) ≈ MultiMatrix(reshape(I(12), (3,4,3,4)))
 
-@info "Testing construction.  Expect 440 ns (7 allocations: 704 bytes)"
+@info "Testing construction.  Expect 520 ns (7 allocations: 704 bytes)"
 @btime ($A)(2,3)
 
 @info "Testing small multiplication.  Expect 700 ns (7 allocations: 704 bytes)"
