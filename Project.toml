@@ -1,0 +1,9 @@
+name = "MultiMatrices"
+uuid = "4f6a5be9-6cd1-4bca-9e4c-190b27da7509"
+authors = ["Ryan Bennink <benninkrs@ornl.gov>"]
+version = "0.2.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
