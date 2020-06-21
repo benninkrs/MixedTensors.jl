@@ -100,7 +100,7 @@ uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 
 [[MiscUtils]]
 deps = ["LinearAlgebra"]
-git-tree-sha1 = "1f3c946d80d3f29dfb754c0f15f5e775d8c9a831"
+git-tree-sha1 = "25843818035fdc91751bc9ebf4ae031a7190d080"
 repo-rev = "master"
 repo-url = "https://github.com/benninkrs/MiscUtils.jl"
 uuid = "35096534-6a70-4072-b012-2b6df64b3c53"

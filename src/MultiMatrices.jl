@@ -26,7 +26,7 @@ module MultiMatrices
 
 export MultiMatrix, lsize, rsize, spaces, nspaces, arraytype, laxes, raxes
 
-using MiscUtilities
+using MiscUtils
 using SuperTuples
 using StaticArrays
 using LinearAlgebra
