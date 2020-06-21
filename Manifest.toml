@@ -166,6 +166,14 @@ git-tree-sha1 = "3db8266fc732c8f997e75cf7a4027d4008f846c8"
 uuid = "5e0ebb24-38b0-5f93-81fe-25c709ecae67"
 version = "1.0.1"
 
+[[SuperTuples]]
+deps = ["StaticArrays"]
+git-tree-sha1 = "0b584a725866a934ebb9e62ada4d7ee00646f777"
+repo-rev = "master"
+repo-url = "https://github.com/benninkrs/SuperTuples.jl"
+uuid = "2532fb96-5642-438b-b515-97252d17ad77"
+version = "0.2.0"
+
 [[TensorOperations]]
 deps = ["CUDA", "LRUCache", "LinearAlgebra", "Requires", "Strided", "TupleTools"]
 git-tree-sha1 = "cb82d88f6b09fd5461f5133aeea732731afb7ac8"
