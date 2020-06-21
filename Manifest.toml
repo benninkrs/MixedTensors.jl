@@ -98,10 +98,11 @@ version = "0.5.5"
 deps = ["Base64"]
 uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 
-[[MiscUtilities]]
-git-tree-sha1 = "06b69852ddc9e889faf5346e9cc4906b6e698f51"
+[[MiscUtils]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "1f3c946d80d3f29dfb754c0f15f5e775d8c9a831"
 repo-rev = "master"
-repo-url = "https://github.com/benninkrs/MiscUtilities.jl"
+repo-url = "https://github.com/benninkrs/MiscUtils.jl"
 uuid = "35096534-6a70-4072-b012-2b6df64b3c53"
 version = "0.1.0"
 
