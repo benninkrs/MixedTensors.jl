@@ -26,9 +26,8 @@ module MultiMatrices
 
 export MultiMatrix, lsize, rsize, spaces, nspaces, arraytype, laxes, raxes
 
-#using BaseExtensions
+using MiscUtilities
 using SuperTuples
-#using TupleTools: vcat, oneto
 using StaticArrays
 using LinearAlgebra
 using TensorOperations: trace!, contract!
@@ -127,7 +126,7 @@ rsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d + nspaces(M)), d
 
 axes(M::MultiMatrix) = axes(M.data)
 axes(M::MultiMatrix, dim) = axes(M.data, dim)
-axes(M::MultiMatrix, dims::Iterable) = axes(M.data, dims)
+axes(M::MultiMatrix, dims::Iterable) = map(d->axes(M.data, d), dims)
 
 
 """
@@ -528,7 +527,7 @@ function *(A::MultiMatrix, B::MultiMatrix)
 	if SA == SB
 		# Simple case:  spaces(A) = spaces(B)
 		raxes(A) == laxes(B) || throw(DimensionMismatch("raxes(A) = $(raxes(A)) must equal laxes(B) = $(laxes(B))"))
-		R = reshape(Matrix(A) * Matrix(B), vcat(lszA, rszB))
+		R = reshape(Matrix(A) * Matrix(B), tcat(lszA, rszB))
 		return MultiMatrix(R, SA; checkspaces = false)
 	else
 		# General case
@@ -541,7 +540,7 @@ function *(A::MultiMatrix, B::MultiMatrix)
 
 		axes(A, tdimsA) == axes(B, tdimsB) || throw(DimensionMismatch("raxes(A) must equal laxes(B) on spaces common to A,B"))
 
-		szAB = vcat(size(A, odimsA), size(B, odimsB))
+		szAB = tcat(size(A, odimsA), size(B, odimsB))
 		szR = szAB[dimsR]
 		#println("sizeR = $szR")
 		#TR = promote_type(TA, TB)
@@ -597,13 +596,13 @@ end
 	nR = nA + nB - nt	# = nA + noB = nB + noA)
 	tdimsA = nA .+ itsa
 	tdimsB = itsb
-	odimsA = vcat(oneto(nA), (nA .+ iosa))
-	odimsB = vcat(iosb, tupseq(nB+1, 2*nB))
+	odimsA = tcat(oneto(nA), (nA .+ iosa))
+	odimsB = tcat(iosb, tupseq(nB+1, 2*nB))
 
 	# open spaces of A, common spaces, open spaces of B
 	nodA = nA + nosA
-	SR = vcat(SA[itsa], SA[iosa], SB[iosb])
-	dimsR = vcat(itsa, iosa, nodA .+ oneto(nosB), (nodA + nosB) .+ itsb, tupseq(nA+1, nA+nosA), (nodA + nosB) .+ iosb)
+	SR = tcat(SA[itsa], SA[iosa], SB[iosb])
+	dimsR = tcat(itsa, iosa, nodA .+ oneto(nosB), (nodA + nosB) .+ itsb, tupseq(nA+1, nA+nosA), (nodA + nosB) .+ iosb)
 	return :( ($tdimsA, $tdimsB, $odimsA, $odimsB, $dimsR, $SR) )
 end
 

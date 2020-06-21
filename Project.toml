@@ -5,6 +5,7 @@ version = "0.2.0"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MiscUtilities = "35096534-6a70-4072-b012-2b6df64b3c53"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 SuperTuples = "2532fb96-5642-438b-b515-97252d17ad77"
 TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
