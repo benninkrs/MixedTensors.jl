@@ -351,7 +351,7 @@ end
 # 	# is_tdim = in.(S, Ref(ts))
 # 	# dims = oneto(length(S))
 # 	# tdims = select(dims, is_tdim)
-# 	# kdims = antiselect(dims, is_tdim)
+# 	# kdims = deleteat(dims, is_tdim)
 # 	(tdims, kdims) = _get_tr_dims(M, Val(ts))
 # 	#(tdims, kdims)
 # 	return tr_dims(M, tdims, kdims)
@@ -362,7 +362,7 @@ end
 # 	# is_tdim = in.(S, Ref(ts))
 # 	# dims = oneto(length(S))
 # 	# tdims = select(dims, is_tdim)
-# 	# kdims = antiselect(dims, is_tdim)
+# 	# kdims = deleteat(dims, is_tdim)
 # 	(tdims, kdims) = _get_tr_dims(M, Val(ts))
 # 	#(tdims, kdims)
 # 	return tr_dims(M, tdims, kdims)
@@ -372,7 +372,7 @@ end
 # 	is_tdim = collect(map(s->in(s, ts), S))
 # 	dims = ntuple(identity, length(S))  #oneto(length(S))
 # 	tdims = dims[is_tdim]	#select(dims, is_tdim)
-# 	kdims = dims[(!).(is_tdim)]	#antiselect(dims, is_tdim)
+# 	kdims = dims[(!).(is_tdim)]	#deleteat(dims, is_tdim)
 # 	return :( ($tdims, $kdims) )
 # end
 
@@ -493,7 +493,7 @@ function _mult_AM(A::AbstractArray{TA}, M::MultiMatrix) where {TA}
 	laxes(M) == axes(A, S) || throw(DimensionMismatch("axes(A, spaces(B)) must equal laxes(B)"))
 
 	nR = max(ndims(A), maximum(S))
-	kdimsA = antiselect(oneto(nR), S)
+	kdimsA = deleteat(oneto(nR), S)
 
 	szR = MVector(size(A, oneto(nR)))
 	rszM = rsize(M)
