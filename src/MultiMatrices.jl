@@ -468,7 +468,7 @@ function _mult_MA(M::MultiMatrix, A::AbstractArray{TA}) where {TA}
 	raxes(M) == axes(A, S) || throw(DimensionMismatch("raxes(M) must equal axes(B, spaces(A))"))
 
 	nR = max(ndims(A), maximum(S))
-	kdimsA = antiselect(oneto(nR), S)
+	kdimsA = deleteat(oneto(nR), S)
 
 	szR = MVector(size(A, oneto(nR)))
 	lszM = lsize(M)
