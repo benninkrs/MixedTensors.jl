@@ -16,7 +16,7 @@ number of "up" and "down" indices.)
 # TODO: Extend addition, subtraction to allow spaces to be in different order
 # TODO: Extend * to form lazy outer products
 # TODO: Support +,- for dissimilar spaces?  Perhaps lazy structures?
-# TODO: Make use of the broadcast system for *,+
+# TODO: Make use of the broadcast system for *,+, etc.
 # TODO: Check validity of dims in lsize, rsize, laxes, raxes
 # TODO: Use Strided.jl instead of TensorOperations?
 # TODO: Support in-place operations?
@@ -31,6 +31,7 @@ using SuperTuples
 using StaticArrays
 using LinearAlgebra
 using TensorOperations: trace!, contract!
+using Base.Broadcast: Broadcasted, BroadcastStyle
 #using PermutedIteration
 
 using Base: promote_op
@@ -43,6 +44,8 @@ import Base: (+), (-), (*), (/), (^)
 import Base: inv, exp, log, sin, cos, tan, sinh, cosh, tanh
 
 import LinearAlgebra: tr, eigvals, svdvals, opnorm
+import Base: BroadcastStyle, similar
+
 
 
 #--------------------------------------
@@ -88,7 +91,6 @@ function MultiMatrix(arr::A, ::Val{S}; checkspaces = true) where A<:AbstractArra
 end
 
 
-
 # Reconstruct with different spaces
 """
 `(M::MultiMatrix)(S::Dims)` or `(M::MultiMatrix)(S::Int...)`
@@ -102,6 +104,11 @@ Create a MultiMatrix with the same data as `M` but acting on spaces `S`.
 
 similar(M::MultiMatrix) = MultiMatrix(similar(M.data), Val(spaces(M)); checkspaces = false)
 similar(M::MultiMatrix, args...) = MultiMatrix(similar(M.data, args...), Val(spaces(M)); checkspaces = false)
+
+# Construct undef based on type and size
+const Shape = Tuple{Union{Integer, Base.OneTo},Vararg{Union{Integer, Base.OneTo}}}
+
+similar(::Type{M}, shape::Shape) where {M<:MultiMatrix{S,T,N,A}} where {S} where {A<:AbstractArray{T,N}} where {T,N} = M(similar(A, shape))
 
 #-------------
 # The following methods all refer on the "native" dimensions
@@ -438,13 +445,13 @@ end
 function +(A::MultiMatrix, B::MultiMatrix)
 	spaces(A) == spaces(B) || error("To add MultiMatrices, they must have the same spaces in the same order.")
 	axes(A) == axes(B) || throw(DimensionMismatch("To add MultiMatrices, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-	return MultiMatrix(A.data + B.data, spaces(A); checkspaces = false)
+	return MultiMatrix(A.data + B.data, Val(spaces(A)); checkspaces = false)
 end
 
 function -(A::MultiMatrix, B::MultiMatrix)
 	spaces(A) == spaces(B) || error("To subtract MultiMatrices, they must have the same spaces in the same order")
 	axes(A) == axes(B) || throw(DimensionMismatch("To subtract MultiMatrices, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-	return MultiMatrix(A.data - B.data, spaces(A); checkspaces = false)
+	return MultiMatrix(A.data - B.data, Val(spaces(A)); checkspaces = false)
 end
 
 # Matrix multiplication.  These methods are actually quite fast -- about as fast as the
@@ -528,7 +535,7 @@ function *(A::MultiMatrix, B::MultiMatrix)
 		# Simple case:  spaces(A) = spaces(B)
 		raxes(A) == laxes(B) || throw(DimensionMismatch("raxes(A) = $(raxes(A)) must equal laxes(B) = $(laxes(B))"))
 		R = reshape(Matrix(A) * Matrix(B), tcat(lszA, rszB))
-		return MultiMatrix(R, SA; checkspaces = false)
+		return MultiMatrix(R, Val(SA); checkspaces = false)
 	else
 		# General case
 		(tdimsA, tdimsB, odimsA, odimsB, dimsR, SR) = get_mult_dims(Val(spaces(A)), Val(spaces(B)))
@@ -548,7 +555,7 @@ function *(A::MultiMatrix, B::MultiMatrix)
 		TR = promote_op(*, eltype(A), eltype(B))
 		R = Atype{TR}(undef, szR)
 		contract!(one(eltype(A)), A.data, :N, B.data, :N, zero(TR), R, odimsA, tdimsA, odimsB, tdimsB, dimsR)
-		return MultiMatrix(R, SR; checkspaces = false)
+		return MultiMatrix(R, Val(SR); checkspaces = false)
 		#return nothing
 	end
 end
@@ -607,8 +614,8 @@ end
 end
 
 
-^(M::MultiMatrix, x::Number) = MultiMatrix(reshape(Matrix(M)^x, size(M)), spaces(M); checkspaces = false)
-^(M::MultiMatrix, x::Integer) = MultiMatrix(reshape(Matrix(M)^x, size(M)), spaces(M); checkspaces = false)
+^(M::MultiMatrix, x::Number) = MultiMatrix(reshape(Matrix(M)^x, size(M)), Val(spaces(M)); checkspaces = false)
+^(M::MultiMatrix, x::Integer) = MultiMatrix(reshape(Matrix(M)^x, size(M)), Val(spaces(M)); checkspaces = false)
 
 #
 # Analytic matrix functions
@@ -631,6 +638,18 @@ opnorm(M::MultiMatrix, args...) = begin chk_square(M); opnorm(Matrix(M), args...
 eigvals(M::MultiMatrix, args...) = begin chk_square(M); eigvals(Matrix(M), args...); end
 svdvals(M::MultiMatrix, args...) = svdvals(Matrix(M), args...)
 
+
+struct MultiMatrixStyle{S,A,N} <: Broadcast.AbstractArrayStyle{N} end
+MultiMatrixStyle{S,A,N}(::Val{N}) where {S,A,N} = MultiMatrixStyle{S,A,N}()
+
+similar(bc::Broadcasted{MMS}, ::Type{T}) where {MMS<:MultiMatrixStyle{S,A,N}} where {S,N} where {A<:AbstractArray} where {T} = similar(MultiMatrix{S,T,N,A}, axes(bc))
+
+BroadcastStyle(::Type{MultiMatrix{S,T,N,A}}) where {S,T,N,A} = MultiMatrixStyle{S,A,N}()
+BroadcastStyle(::Type{MultiMatrix{S,T1,N,A1}}, ::Type{MultiMatrix{S,T2,N,A2}})  where {A1<:AbstractArray{T1,N}} where {A2<:AbstractArray{T2,N}} where {S,N} where {T1,T2} = MultiMatrixStyle{S, promote_type(A1,A2), N}()
+BroadcastStyle(::Type{<:MultiMatrix}, ::Type{<:MultiMatrix}) = error("To be broadcasted, MultiMatrices must have the same dimensions and the same spaces in the same order")
+
+# BroadcastStyle(::Type{BitString{L,N}}) where {L,N} = BitStringStyle{L,N}()
+# BroadcastStyle(::BitStringStyle, t::Broadcast.DefaultArrayStyle{N}) where {N} = Broadcast.DefaultArrayStyle{max(1,N)}()
 
 
 #
