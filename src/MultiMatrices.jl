@@ -8,6 +8,7 @@ vector space L of size (l1,...,ln) and a "right" vector space R of size
 number of "up" and "down" indices.)
 """
 
+# TODO: Figure out why broadcasting is slow
 # TODO: Parameterize by Tuple{spaces} instead of spaces -- infers better? (a la how StaticArrays does it)
 #			No, it doesn't help with constructors like M((5,3,6)).
 #			To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
@@ -16,7 +17,6 @@ number of "up" and "down" indices.)
 # TODO: Extend addition, subtraction to allow spaces to be in different order
 # TODO: Extend * to form lazy outer products
 # TODO: Support +,- for dissimilar spaces?  Perhaps lazy structures?
-# TODO: Make use of the broadcast system for *,+, etc.
 # TODO: Check validity of dims in lsize, rsize, laxes, raxes
 # TODO: Use Strided.jl instead of TensorOperations?
 # TODO: Support in-place operations?
