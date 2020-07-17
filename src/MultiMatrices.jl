@@ -8,10 +8,16 @@ vector space L of size (l1,...,ln) and a "right" vector space R of size
 number of "up" and "down" indices.)
 """
 
+# TODO: Do we really need to parameterize by the spaces?
+#	- To do the space math efficiently, we just need to know the tuple lengths
+#	- However, the output of get_mult_dims is (amazinagly!) inferred (at least for low-
+#		dimensional matrices).  If we got rid of the space parameter we would gain type
+#		stability on more constructors, but lose type stability on multiplication (wouldn't
+#		be able to infer the dimensionality of the result)
 # TODO: Figure out why broadcasting is slow
 # TODO: Parameterize by Tuple{spaces} instead of spaces -- infers better? (a la how StaticArrays does it)
-#			No, it doesn't help with constructors like M((5,3,6)).
-#			To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
+#	- No, it doesn't help with constructors like M((5,3,6)).
+#	- To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
 # TODO: Use generated functions to speed up dimension-mangling
 # TODO: Use dispatch to separate out A*B with same spaces
 # TODO: Extend addition, subtraction to allow spaces to be in different order
@@ -397,7 +403,7 @@ function +(M::MultiMatrix{S,TM} where {S}, II::UniformScaling{TI}) where {TM,TI<
 	for ci in CartesianIndices(lsize(M))
 		R[ci,ci] += II.λ
 	end
-	return MultiMatrix(R, spaces(M); checkspaces = false)
+	return MultiMatrix(R, Val(spaces(M)); checkspaces = false)
 end
 (+)(II::UniformScaling, M::MultiMatrix) = M + II
 
@@ -407,7 +413,7 @@ function -(M::MultiMatrix{S,TM} where {S}, II::UniformScaling{TI}) where {TM,TI}
 	for ci in CartesianIndices(lsize(M))
 		R[ci,ci] -= II.λ
 	end
-	return MultiMatrix(R, spaces(M); checkspaces = false)
+	return MultiMatrix(R, Val(spaces(M)); checkspaces = false)
 end
 
 function -(II::UniformScaling{TI}, M::MultiMatrix{S,TM} where {S}) where {TM,TI<:Number}
@@ -416,7 +422,7 @@ function -(II::UniformScaling{TI}, M::MultiMatrix{S,TM} where {S}) where {TM,TI<
 	for ci in CartesianIndices(lsize(M))
 		R[ci,ci] = II.λ - R[ci,ci]
 	end
-	return MultiMatrix(R, spaces(M); checkspaces = false)
+	return MultiMatrix(R, Val(spaces(M)); checkspaces = false)
 end
 
 *(M::MultiMatrix, II::UniformScaling) = M * II.λ
@@ -624,7 +630,7 @@ end
 for f in [:inv, :sqrt, :exp, :log, :sin, :cos, :tan, :sinh, :cosh, :tanh]
 	@eval function $f(M::MultiMatrix)
 			chk_square(M)
-			MultiMatrix(reshape($f(Matrix(M)), size(M)), spaces(M); checkspaces = false)
+			MultiMatrix(reshape($f(Matrix(M)), size(M)), Val(spaces(M)); checkspaces = false)
 		end
 end
 
