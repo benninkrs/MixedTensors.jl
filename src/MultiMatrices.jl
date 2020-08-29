@@ -8,25 +8,53 @@ vector space L of size (l1,...,ln) and a "right" vector space R of size
 number of "up" and "down" indices.)
 """
 
-# TODO: Do we really need to parameterize by the spaces?
-#	- To do the space math efficiently, we just need to know the tuple lengths
-#	- However, the output of get_mult_dims is (amazinagly!) inferred (at least for low-
-#		dimensional matrices).  If we got rid of the space parameter we would gain type
-#		stability on more constructors, but lose type stability on multiplication (wouldn't
-#		be able to infer the dimensionality of the result)
-# TODO: Figure out why broadcasting is slow
-# TODO: Parameterize by Tuple{spaces} instead of spaces -- infers better? (a la how StaticArrays does it)
-#	- No, it doesn't help with constructors like M((5,3,6)).
-#	- To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
-# TODO: Use generated functions to speed up dimension-mangling
-# TODO: Use dispatch to separate out A*B with same spaces
-# TODO: Extend addition, subtraction to allow spaces to be in different order
-# TODO: Extend * to form lazy outer products
-# TODO: Support +,- for dissimilar spaces?  Perhaps lazy structures?
-# TODO: Check validity of dims in lsize, rsize, laxes, raxes
-# TODO: Use Strided.jl instead of TensorOperations?
-# TODO: Support in-place operations?
-# TODO: Generalize to different in spaces and out spaces?
+#=
+TODO: Do we really need to parameterize by the spaces?
+	- To do the space math efficiently, we just need to know the tuple lengths.
+	- The output of get_mult_dims is "inferred" because it's generated. If we got rid
+		of the space parameter we would gain type stability on some constructors, but lose type stability on multiplication (wouldn't be able to infer the dimensionality of
+		the result).
+
+		Does knowing the dimension of the output array even matter?  It's allocated at
+		runtime anyway.  A simple test suggests it doesn't matter.
+		What seems to matter more is inferring tuple sizes.  So, instead of having spaces
+		be a tuple type parameter, should it be a tuple (or maybe even Vector?) field?
+		Ah, but then we would lose the ability to infer (e.g.) the number of spaces
+		resulting from multiplication
+
+TODO: Currently, specifying spaces as a tuple allows arbitrary labels for spaces.
+			We probably don't need to be this general. It necessates a lot of tedious
+			dimension-wrangling (e.g., finding the union of a set of spaces).
+			Consider replacing a tuple of arbitrary spaces with a BitSet that marks
+			which dimensions the array applies to.  Of course, if the spaces are specified
+			out-of-order, the array dims will need to be permuted.
+TODO: Alternatively, we could go the opposite way and give vector spaces identity.
+			We could even make the length a static parameter, but that would make
+			slicing and stacking arrays harder. It could also be annoying to have
+			vector spaces that are mathemetically identical but with different names be
+			incompatible.
+TODO: Parameterize by Tuple{spaces} instead of spaces -- infers better? (a la how StaticArrays does it)
+	- No, it doesn't help with constructors like M((5,3,6)).
+	- To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
+TODO: Use generated functions to speed up dimension-mangling?
+TODO: Use dispatch to separate out A*B with same spaces
+TODO: Extend addition, subtraction to allow spaces to be in different order
+TODO: Extend * to form lazy outer products
+TODO: Support +,- for dissimilar spaces?  Perhaps lazy structures?
+TODO: Figure out why broadcasting is slow
+TODO: Use Strided.jl?
+TODO: Support in-place operations?
+TODO: Check validity of dims in lsize, rsize, laxes, raxes
+TODO: Generalize to different left spaces and right spaces?
+TODO: generalize + to >2 arguments
+TODO: Better support of different underlying array types
+			In places (e.g. *) it is assumed that the underlying array type has
+			the element type as the first parameter and has a constructor of the
+			form ArrayType{ElementType}(undef, size).
+		* OR *
+			Back with Array type only?  No, this limits future exensibility. Also, it would
+			make it harder to construct from a non-standard array.
+=#
 
 module MultiMatrices
 
@@ -108,7 +136,7 @@ Create a MultiMatrix with the same data as `M` but acting on spaces `S`.
 (M::MultiMatrix{S,T,N,A})(spaces::Tuple{Vararg{Int64}}) where {S,T,N,A<:AbstractArray{T,N}} = MultiMatrix{spaces,T,N,A}(M.data)
 
 
-similar(M::MultiMatrix) = MultiMatrix(similar(M.data), Val(spaces(M)); checkspaces = false)
+#similar(M::MultiMatrix) = MultiMatrix(similar(M.data), Val(spaces(M)); checkspaces = false)
 similar(M::MultiMatrix, args...) = MultiMatrix(similar(M.data, args...), Val(spaces(M)); checkspaces = false)
 
 # Construct undef based on type and size
@@ -159,6 +187,13 @@ raxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d + nspaces(M)), d
 
 
 arraytype(::MultiMatrix{S,T,N,A} where {S,T,N}) where A = A
+
+# # Return the type of an array
+# function promote_arraytype(A::MultiMatrix, B::MultiMatrix)
+# 	# This only works if the array type has the dimension as the last parameter.
+# 	# Uh oh ... how could even know where the dimension parameter is?
+#   return freelastparameter(promote_type(arraytype(A), arraytype(B)))
+# end
 
 
 function ==(X::MultiMatrix, Y::MultiMatrix)
@@ -261,8 +296,8 @@ end
 
 
 ##------------------------
-# The following functions involve explicit spaces. Therefore, these refer to actual
-# spaces not relative.
+# The following functions take space labels (not dimensions, or indices of spaces)
+# as arguments.
 
 # Partial transpose
 function transpose(M::MultiMatrix, ts::Dims)
@@ -449,10 +484,42 @@ end
 
 
 function +(A::MultiMatrix, B::MultiMatrix)
-	spaces(A) == spaces(B) || error("To add MultiMatrices, they must have the same spaces in the same order.")
-	axes(A) == axes(B) || throw(DimensionMismatch("To add MultiMatrices, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-	return MultiMatrix(A.data + B.data, Val(spaces(A)); checkspaces = false)
+	if spaces(A) == spaces(B)
+		axes(A) == axes(B) || throw(DimensionMismatch("To add MultiMatrices on the same spaces, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
+		return MultiMatrix(A.data + B.data, Val(spaces(A)); checkspaces = false)
+	# TODO: elseif spaces are the same, but in different order ...
+	else
+		error("Not implemented")
+		return add_different(A, B)
+	end
 end
+
+#
+# function add_different(A::MultiMatrix, B::MultiMatrix)
+# 	SA = spaces(A)
+# 	SB = spaces(B)
+# 	(SRv, AinR, BinR) = indexed_union(SA, SB)
+#
+# 	SR = tuple(SRv)
+#
+# 	A = promote_type(arraytype(A), arraytype(B))
+#
+# 	C = MultiMatrix{SR, eltype(A), A
+#
+# 	return _add_different(A, B, SR, AinR, BinR)
+# end
+#
+# function _add_different(A::MultiMatrix, B::MultiMatrix, SR,
+# 	# AinC = indices of A in C
+# 	# BinC = inices of B in C
+#
+# 	#for iC in CartesianIndices(
+# 	#	for jC in CartisianIndices
+# 	#C[iC] = A[iC[AinC]] + B[iC[BinC]]
+# 	#
+# 	#
+# end
+
 
 function -(A::MultiMatrix, B::MultiMatrix)
 	spaces(A) == spaces(B) || error("To subtract MultiMatrices, they must have the same spaces in the same order")
