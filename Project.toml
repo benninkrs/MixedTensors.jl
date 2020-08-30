@@ -4,6 +4,7 @@ authors = ["Ryan Bennink <benninkrs@ornl.gov>"]
 version = "0.3.1"
 
 [deps]
+BitIntegers = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MiscUtils = "35096534-6a70-4072-b012-2b6df64b3c53"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"

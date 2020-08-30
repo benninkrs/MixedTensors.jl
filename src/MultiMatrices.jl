@@ -9,33 +9,6 @@ number of "up" and "down" indices.)
 """
 
 #=
-TODO: Do we really need to parameterize by the spaces?
-	- To do the space math efficiently, we just need to know the tuple lengths.
-	- The output of get_mult_dims is "inferred" because it's generated. If we got rid
-		of the space parameter we would gain type stability on some constructors, but lose type stability on multiplication (wouldn't be able to infer the dimensionality of
-		the result).
-
-		Does knowing the dimension of the output array even matter?  It's allocated at
-		runtime anyway.  A simple test suggests it doesn't matter.
-		What seems to matter more is inferring tuple sizes.  So, instead of having spaces
-		be a tuple type parameter, should it be a tuple (or maybe even Vector?) field?
-		Ah, but then we would lose the ability to infer (e.g.) the number of spaces
-		resulting from multiplication
-
-TODO: Currently, specifying spaces as a tuple allows arbitrary labels for spaces.
-			We probably don't need to be this general. It necessates a lot of tedious
-			dimension-wrangling (e.g., finding the union of a set of spaces).
-			Consider replacing a tuple of arbitrary spaces with a BitSet that marks
-			which dimensions the array applies to.  Of course, if the spaces are specified
-			out-of-order, the array dims will need to be permuted.
-TODO: Alternatively, we could go the opposite way and give vector spaces identity.
-			We could even make the length a static parameter, but that would make
-			slicing and stacking arrays harder. It could also be annoying to have
-			vector spaces that are mathemetically identical but with different names be
-			incompatible.
-TODO: Parameterize by Tuple{spaces} instead of spaces -- infers better? (a la how StaticArrays does it)
-	- No, it doesn't help with constructors like M((5,3,6)).
-	- To get inferred it Would need to be M(Tuple{5,3,6}) which is almost as bad as M(Val((5,3,6))).
 TODO: Use generated functions to speed up dimension-mangling?
 TODO: Use dispatch to separate out A*B with same spaces
 TODO: Extend addition, subtraction to allow spaces to be in different order
@@ -45,7 +18,6 @@ TODO: Figure out why broadcasting is slow
 TODO: Use Strided.jl?
 TODO: Support in-place operations?
 TODO: Check validity of dims in lsize, rsize, laxes, raxes
-TODO: Generalize to different left spaces and right spaces?
 TODO: generalize + to >2 arguments
 TODO: Better support of different underlying array types
 			In places (e.g. *) it is assumed that the underlying array type has
@@ -58,7 +30,7 @@ TODO: Better support of different underlying array types
 
 module MultiMatrices
 
-export MultiMatrix, lsize, rsize, spaces, nspaces, arraytype, laxes, raxes
+export MultiMatrix, lsize, rsize, lspaces, rspaces, nlspaces, nrspaces
 
 using MiscUtils
 using SuperTuples
@@ -70,6 +42,7 @@ using Base.Broadcast: Broadcasted, BroadcastStyle
 
 using Base: promote_op
 
+import Base: show
 import Base: ndims, length, size, axes, similar
 import Base: reshape, permutedims, adjoint, transpose, Matrix, ==
 import Base: getindex, setindex!
@@ -87,53 +60,83 @@ import Base: BroadcastStyle, similar
 
 const Iterable = Union{Tuple, AbstractArray, UnitRange, Base.Generator}
 
+# Alias for whatever integer type we use to specify a set of vector spaces
+# Not to be confused with DataStructures.IntSet or Base.BitSet.
+const IntSet = UInt128
 
 """
-`MultiMatrix(A::AbstractArray, S::Dims)` creates a multimatrix from array `A` acting on
-spaces `S`. The elements of `S` must be unique `ndims(A)` must equal `2*length(S)'.
+	MultiMatrix{LS, RS, T, N, A<:AbstractArray{T,N}}	(struct)
+
+A `MultiMatrix` represents a linear map between vector spaces on its left and right,
+each of which is generally a tensor product space.
+`LS` specifies the vector spaces acted upon on the left; `RS` specifies the vector
+spaces acted upon on the right.
 """
-struct MultiMatrix{S, T, N, A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+struct MultiMatrix{LS, RS, T, N, A<:AbstractArray{T,N}, NL, NR} <: AbstractArray{T,N}
 	data::A
+	ldims::Dims{NL}		# dimensions of A corresponding to left spaces
+	rdims::Dims{NR}		# dimensions of A corresponding to right spaces
+
 	# Constructor with input validation
-	function MultiMatrix{S,T,N,A}(data::A; checkspaces = true) where {A<:AbstractArray{T,N}} where {T,N,S}
-		if N != 2*length(S)
-			error("ndims(A) must be twice the number of specified spaces.")
-		end
-		if checkspaces && !allunique(S)
-			error("Spaces must be unique")
-		end
-		return new{S,T,N,A}(data)
+	function MultiMatrix{LS, RS, T, N, A}(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}) where {LS, RS, NL, NR} where {A<:AbstractArray{T,N}} where {T,N}
+		# NL == count_ones(LS)
+		# NR == count_ones(RS)
+		# NL + NR == N || error("ndims(A) must be equal the total number of spaces (left + right)")
+		return new{LS, RS, T, N, A, NL, NR}(data, ldims, rdims)
 	end
 end
 
 # Convenience constructors
+"""
+	MultiMatrix(A::AbstractArray)
+	MultiMatrix(A::AbstractArray, spaces::Tuple)
+	MultiMatrix(A::AbstractArray, lspaces::Tuple, rspaces::Tuple)
+
+Create from array 'A' a MultiMatrix that acts on specified vector spaces.
+The elements of `spaces` (or `lspaces` or `rspaces`) must be distinct.
+If omitted, `spaces` is taken to be `(1,...,ndims(A)/2)`.
+`rspaces` defaults to `lspaces`.
+`length(lspaces) + length(rspaces)` must equal `ndims(A)`.
+
+ To construct a MultiMatrix with default left spaces and no right spaces, use
+ [`MultiVector(A)`](@ref).
+"""
+function MultiMatrix end
 
 # Construct from array with default spaces
 function MultiMatrix(arr::A) where A<:AbstractArray{T,N} where {T,N}
 	iseven(N) || error("Source array must have an even number of dimensions")
-	MultiMatrix{oneto(N>>>1),T,N,A}(arr; checkspaces = false)
+	M = N >> 1
+	LS = IntSet(N-1)		# trick to create 001⋯1 with M ones
+	MultiMatrix{LS,LS,T,N,A}(arr, oneto(M), tupseq(M+1, N))
 end
 
-# Construct from array with custom spaces
-function MultiMatrix(arr::A, S::Dims; checkspaces = true) where A<:AbstractArray{T,N} where {T,N}
-	MultiMatrix{S,T,N,A}(arr; checkspaces = checkspaces)
-end
+# Construct from array with custom spaces.
+MultiMatrix(arr, spaces) = MultiMatrix(arr, Val{spaces})
 
-# construct from array with custom spaces (type-inferrable)
-function MultiMatrix(arr::A, ::Val{S}; checkspaces = true) where A<:AbstractArray{T,N} where {T,N,S}
-	MultiMatrix{S,T,N,A}(arr; checkspaces = checkspaces)
+
+# Faster type-inferred version.
+function MultiMatrix(arr::A, ::Type{Val{S}}) where {S} where {NL} where A<:AbstractArray{T,N} where {T,N}
+	dims = sortperm(S)
+	LS = binteger(IntSet, Val{S})
+	MultiMatrix{LS,LS,T,N,A}(arr, dims, length(S) .+ dims)
 end
 
 
 # Reconstruct with different spaces
 """
-`(M::MultiMatrix)(S::Dims)` or `(M::MultiMatrix)(S::Int...)`
+	(M::MultiMatrix)(spaces...)
+	(M::MultiMatrix)(spaces::Tuple)
+	(M::MultiMatrix)(lspaces::Tuple, rspaces::Tuple)`
 
-Create a MultiMatrix with the same data as `M` but acting on spaces `S`.
+Create a MultiMatrix with the same data as `M` but acting on different spaces.
+This can also be used to lazily permute a MultiMatrix.
 """
 (M::MultiMatrix)(spaces::Vararg{Int64}) = M(spaces)
-#(M::MultiMatrix)(spaces::Tuple{Vararg{Int64}}) = MultiMatrix(M.data, spaces)
-(M::MultiMatrix{S,T,N,A})(spaces::Tuple{Vararg{Int64}}) where {S,T,N,A<:AbstractArray{T,N}} = MultiMatrix{spaces,T,N,A}(M.data)
+
+# Will this infer?
+(M::MultiMatrix)(spaces::Tuple{Vararg{Int64,N}}) where {N} = MultiMatrix(M.data, spaces)
+(M::MultiMatrix)(::Type{Val{S}}) where {S} = MultiMatrix(M.data, Val{S})
 
 
 #similar(M::MultiMatrix) = MultiMatrix(similar(M.data), Val(spaces(M)); checkspaces = false)
@@ -149,41 +152,44 @@ similar(::Type{M}, shape::Shape) where {M<:MultiMatrix{S,T,N,A}} where {S} where
 
 # Size and shape
 ndims(M::MultiMatrix) = ndims(M.data)
-spaces(M::MultiMatrix{S}) where {S} = S
-nspaces(M::MultiMatrix{S}) where {S} = length(S)
+lspaces(M::MultiMatrix{LS}) where {LS} = invpermute(findbits(LS), M.ldims)
+rspaces(M::MultiMatrix{LS, RS}) where {LS,RS} = invpermute(findbits(RS), M.rdims .- nlspaces(M))
+nlspaces(M::MultiMatrix{LS, RS, T, N, A, NL, NR}) where {LS, RS, T, N, A, NL, NR} = NL
+nrspaces(M::MultiMatrix{LS, RS, T, N, A, NL, NR}) where {LS, RS, T, N, A, NL, NR} = NR
+
 length(M::MultiMatrix) = length(M.data)
 
 size(M::MultiMatrix) = size(M.data)
 size(M::MultiMatrix, dim) = size(M.data, dim)
 size(M::MultiMatrix, dims::Iterable) = size(M.data, dims)
 
-lsize(M::MultiMatrix) =  ntuple(d -> size(M.data, d), nspaces(M))
-lsize(M::MultiMatrix, dim) =  size(M.data, dim)
-lsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d), dims)
-
-rsize(M::MultiMatrix) = ntuple(d -> size(M.data, d+nspaces(M)), nspaces(M))
-rsize(M::MultiMatrix, dim) =  size(M.data, dim + nspaces(M))
-rsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d + nspaces(M)), dims)
+# lsize(M::MultiMatrix) =  ntuple(d -> size(M.data, d), nspaces(M))
+# lsize(M::MultiMatrix, dim) =  size(M.data, dim)
+# lsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d), dims)
+#
+# rsize(M::MultiMatrix) = ntuple(d -> size(M.data, d+nspaces(M)), nspaces(M))
+# rsize(M::MultiMatrix, dim) =  size(M.data, dim + nspaces(M))
+# rsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d + nspaces(M)), dims)
 
 axes(M::MultiMatrix) = axes(M.data)
 axes(M::MultiMatrix, dim) = axes(M.data, dim)
 axes(M::MultiMatrix, dims::Iterable) = map(d->axes(M.data, d), dims)
 
 
-"""
-`laxes(M)` left axes of `M`.
-"""
-#laxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d), nspaces(M))		# inexplicably, this doesn't infer even though raxes(M) does
-laxes(M::MultiMatrix) = map(d -> axes(M.data, d), oneto(nspaces(M)))
-laxes(M::MultiMatrix, dim) = axes(M.data, dim)
-laxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d), dims)
-
-"""
-`raxes(M)` right axes of `M`.
-"""
-raxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d+nspaces(M)), nspaces(M))
-raxes(M::MultiMatrix, dim) = axes(M.data, dim + nspaces(M))
-raxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d + nspaces(M)), dims)
+# """
+# `laxes(M)` left axes of `M`.
+# """
+# #laxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d), nspaces(M))		# inexplicably, this doesn't infer even though raxes(M) does
+# laxes(M::MultiMatrix) = map(d -> axes(M.data, d), oneto(nspaces(M)))
+# laxes(M::MultiMatrix, dim) = axes(M.data, dim)
+# laxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d), dims)
+#
+# """
+# `raxes(M)` right axes of `M`.
+# """
+# raxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d+nspaces(M)), nspaces(M))
+# raxes(M::MultiMatrix, dim) = axes(M.data, dim + nspaces(M))
+# raxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d + nspaces(M)), dims)
 
 
 arraytype(::MultiMatrix{S,T,N,A} where {S,T,N}) where A = A
