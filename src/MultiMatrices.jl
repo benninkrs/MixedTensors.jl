@@ -386,7 +386,7 @@ function tr_dims(M::MultiMatrix, tdims, kdims::Dims)
 	rsz = rsize(M)
 	Atype = arraytype(M).name.wrapper
 	R = Atype{eltype(M),2*K}(undef, lsz[kdims]..., rsz[kdims]...)
-	trace!(1, M.data, :N, 0, R, kdims, kdims+n, tdims, tdims+n)
+	trace!(1, M.data, :N, 0, R, kdims, kdims .+ n, tdims, tdims .+ n)
 	return MultiMatrix(R, S[kdims]; checkspaces = false)
 end
 
