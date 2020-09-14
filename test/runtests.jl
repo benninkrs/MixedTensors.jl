@@ -27,8 +27,8 @@ BB = MultiMatrix(rand(6,5,4,3,5,4,3,2))
 @btime $AA*$BB;
 
 # tr(Matrix(R)) takes only 12 ns.
-@info "Testing small trace.  Expect 60 ns (3 allocations: 112 bytes)"
+@info "Testing small trace.  Expect 60 ns (2 allocations: 96 bytes)"
 @btime tr($R);
 
-@info "Testing small partial trace.  Expect ? ns (? allocations: ? bytes)"
+@info "Testing small partial trace.  Expect 473 ns (12 allocations: 816 bytes)"
 @btime tr($R, 2);
