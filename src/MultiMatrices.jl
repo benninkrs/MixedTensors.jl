@@ -94,6 +94,9 @@ end
 
 # Convenience constructors
 
+# Construct from array when the space parameters are known
+MultiMatrix{LS,RS}(arr::A, ldims, rdims) where {LS,RS} where {A <: AbstractArray{T,N}} where {T,N} = MultiMatrix{LS,RS,T,N,A}(arr, ldims, rdims)
+
 # Construct from array with default spaces
 """
 	MultiMatrix(A::AbstractArray)
@@ -115,6 +118,7 @@ function MultiMatrix(arr::A) where A<:AbstractArray{T,N} where {T,N}
 	LS = IntSet(N-1)		# trick to create 001⋯1 with M ones
 	MultiMatrix{LS,LS,T,N,A}(arr, oneto(M), tupseq(M_1,2*M))
 end
+
 
 # Construct from array with custom spaces.
 MultiMatrix(arr, spaces::Dims) = MultiMatrix(arr, Val{spaces})
@@ -200,27 +204,27 @@ axes(M::MultiMatrix) = axes(M.data)
 axes(M::MultiMatrix, dim) = axes(M.data, dim)
 axes(M::MultiMatrix, dims::Iterable) = map(d->axes(M.data, d), dims)
 
-lsize(M::MultiMatrix) = ntuple(d -> size(M.data, d), nlspaces(M))
+lsize(M::MultiMatrix) = ntuple(d -> size(M.data, d), Val(nlspaces(M)))
 lsize(M::MultiMatrix, dim) =  size(M.data, dim)
 lsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d), dims)
 
-rsize(M::MultiMatrix) = ntuple(d -> size(M.data, d+nlspaces(M)), nrspaces(M))
+rsize(M::MultiMatrix) = ntuple(d -> size(M.data, d+nlspaces(M)), Val(nrspaces(M)))
 rsize(M::MultiMatrix, dim) =  size(M.data, dim + nlspaces(M))
 rsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d + nspaces(M)), dims)
 
-laxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d), nlspaces(M))
+laxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d), Val(nlspaces(M)))
 laxes(M::MultiMatrix, dim) = axes(M.data, dim)
 laxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d), dims)
 
-raxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d+nlspaces(M)), nrspaces(M))
+raxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d+nlspaces(M)), Val(nrspaces(M)))
 raxes(M::MultiMatrix, dim) = axes(M.data, dim + nlspaces(M))
 raxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d + nlspaces(M)), dims)
 
 
 arraytype(::MultiMatrix{LS,RS,T,N,A} where {LS,RS,T,N}) where A = A
 
-calc_strides(sz::Dims{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : sz[i-1], N))
-calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1]) - first(ax[i-1]) + 1, N))
+calc_strides(sz::Dims{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : sz[i-1], Val(N)))
+calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1]) - first(ax[i-1]) + 1, Val(N)))
 
 calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
 
@@ -268,13 +272,23 @@ end
 
 
 # Internal functions to make ensure a MultiMatrix is "square".
-# A MultiMatrix M is *square* if lspaces(M) == rspaces(M) and laxes(M) == raxes(M).
+# A MultiMatrix M is *square* if it has the same left and right spaces (in any order)
+# and the corresponding left and right axes are the same.
+# It is "proper" square if it is square and the left and right spaces are in the same order.
 #
 # square(M) returns the square version of M (either M or a permutation of M) if it exists;
 # otherwise throws an error
 
+@inline function square(M::MultiMatrix{LS,LS}) where {LS}
+	axes(M, M.ldims) == axes(M, M.rdims) ? M : throw(DimensionMismatch("MultiMatrix is not square"))
+end
+
+# This is the fallback, in the case M's left and right spaces are different
+@inline square(M::MultiMatrix{LS,RS}) where {LS,RS} = throw(DimensionMismatch("MultiMatrix is not square"))
+
+
 # This is called if M has the same left and right spaces (possibly in different order)
-function square(M::MultiMatrix{LS,LS,T,N,A,NS,NS}) where A<:AbstractArray{T,N} where {LS,T,N,NS}
+@inline function proper_square(M::MultiMatrix{LS,LS,T,N,A,NS,NS}) where A<:AbstractArray{T,N} where {LS,T,N,NS}
 	if M.ldims == M.rdims .- NS
 		laxes(M) == raxes(M) ? M : throw(DimensionMismatch("MultiMatrix is not square"))
 	else
@@ -285,7 +299,7 @@ function square(M::MultiMatrix{LS,LS,T,N,A,NS,NS}) where A<:AbstractArray{T,N} w
 end
 
 # This is the fallback, in the case M's left and right spaces are different
-square(M::MultiMatrix{LS,RS}) where {LS,RS} = throw(DimensionMismatch("MultiMatrix is not square"))
+@inline proper_square(M::MultiMatrix{LS,RS}) where {LS,RS} = throw(DimensionMismatch("MultiMatrix is not square"))
 
 
 # # Ensure that M is square in selected spaces; if not possible, throw an error
@@ -357,19 +371,22 @@ transpose(M::MultiMatrix, ts::Dims) = transpose(M, Val{ts})
 function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS, RS, T, N, A, tspaces}
 	# This is harder with possibly different left and right spaces
 
-	NL = nlspaces(M)
-	NR = nrspaces(M)
+	# NL = nlspaces(M)
+	# NR = nrspaces(M)
 
-	TS = binteger(IntSet, tspaces)
+	TS = binteger(IntSet, Val{tspaces})
 	TSL = TS & LS		# transposed spaces on the left side
 	TSR = TS & RS		# transposed spaces on the right side
 
-	ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
-	rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
 
-	if (TS & LS) == TS && (TS & RS) == TS
+	if iszero(TSL) && iszero(TSR)
+		# nothing to transpose
+		return M
+	elseif TSL == TS && TSR == TS
 		# All the spaces are in both left and right.
 		# We just need to permute the ltrans and rtrans
+		ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
+		rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
 		ltdims = M.ldims[ltrans]
 		rtdims = M.rdims[rtrans]
 		lperm = setindex(M.ldims, rtdims, ltrans)
@@ -378,8 +395,10 @@ function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS,
 		arr = permutedims(M.data, (lperm..., rperm...))
 		return MultiMatrix{LS,RS,T,N,A}(arr, M.ldims, M.rdims)
 	else
-		lkeep = findnzbits(~TS, LS)	# left spaces to keep as left
-		rkeep = findnzbits(~TS, RS)	# right spaces to keep as right
+		ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
+		rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
+		lkeep = findnzbits(Val{~TS}, Val{LS})	# left spaces to keep as left
+		rkeep = findnzbits(Val{~TS}, Val{RS})	# right spaces to keep as right
 
 		# new left and right spaces
 		LS_ = (LS & ~TS) | TSR
@@ -397,15 +416,11 @@ function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS,
 
 		ldims_ = invpermute((lkept..., lnew...), oneto(Val{count_ones(LS_)}))
 		rdims_ = invpermute((rkept..., rnew...), oneto(Val{count_ones(RS_)}))
-		# @info "ltrans = $ltrans, rtrans = $rtrans"
-		# @info "lkeep = $lkeep, rkeep = $rkeep"
-		# @info "ldims_ = $ldims_, rdims_ = $rdims_"
-		#
+
 		arr = permutedims(M.data, perm)
-		M_ = MultiMatrix{LS_,RS_,T,N,A}(arr, ldims_, rdims_)
+		return MultiMatrix{LS_,RS_,T,N,A}(arr, ldims_, rdims_)
 		# @info typeof(M_)
 		# @info findnzbits(lspace_int(M_)), findnzbits(rspace_int(M_))
-		return M_
 	end
 end
 
@@ -442,6 +457,30 @@ end
 # 	return :( $t )
 # end
 
+macro diagonal_op(M, Idx, Op)
+	escM = esc(M)
+	escIdx = esc(Idx)
+	escOp = esc(Op)
+	quote
+		if $escM.ldims == $escM.rdims .- nlspaces($escM)
+			# Perfectly square -- no permuting necessary
+			# sum along diagonal
+			n = prod(lsize($escM))
+			@inbounds for $escIdx in 1:n+1:n^2
+				$escOp
+			end
+		else
+			# Same spaces but in a different order. Need to permute.
+			# An explicit loop is faster than reshaping into a matrix
+			strides_ = calc_strides(axes($escM))
+			strides = strides_[$escM.ldims] .+ strides_[$escM.rdims]
+			@inbounds for ci in CartesianIndices(axes($escM, $escM.ldims))
+				$escIdx = calc_index(ci, strides)
+				$escOp
+			end
+		end
+	end
+end
 
 
 """
@@ -455,27 +494,10 @@ space with the corresponding right space and returns a scalar.
 Trace over the the indicated spaces, returning another `MultiMatrix`.
 """
 function tr(M::MultiMatrix{LS,RS}) where {LS,RS}
-	# An explicit loop is faster than reshaping into a matrix
+	square(M)	# this is slower
 	if LS == RS
 		s = zero(eltype(M))
-		if M.ldims == M.rdims .- nlspaces(M)
-			# Perfectly square -- no permuting necessary
-			laxes(M) == raxes(M) || error("To trace a MultiMatrix, the ordered left and right axes must be the same.")
-			n = prod(lsize(M))
-			i = 1
-			# sum along diagonal
-			for iter = 1:n
-				s += M.data[i]
-				i += (n+1)
-			end
-		else
-			# Same spaces but in a different order. Need to permute.
-			perm = M.rdims[invperm(M.ldims)] .- nlspaces(M)
-			laxes(M) == raxes(M)[perm] || error("Left and right axes are not the same")
-			for (ci,cj) in zip(CartesianIndices(laxes(M)), PermIter(raxes(M), perm))
-				s += M.data[ci,cj]
-			end
-		end
+		@diagonal_op M iA s += M.data[iA]
 		return s
 	else
 		error("To trace a MultiMatrix, the left and right spaces must be the same (up to ordering).")
@@ -496,6 +518,14 @@ function tr(M::MultiMatrix{LS,RS}, ::Type{Val{tspaces}}) where {LS,RS,tspaces}
 	# Int representation of kept spaces
 	KLS = ~TS & LS
 	KRS = ~TS & RS
+
+	if iszero(TS & LS) && iszero(TS & RS)
+		# nothing to trace
+		return M
+	elseif iszero(KLS) && iszero(KRS)
+		# trace everything
+		return tr(M)
+	end
 
 	# find dims to be traced and ktp
 
@@ -519,32 +549,28 @@ end
 # Operations with UniformScaling
 #
 
-function +(M::MultiMatrix{S,TM} where {S}, II::UniformScaling{TI}) where {TM,TI<:Number}
-	chk_square(M)
-	R = LinearAlgebra.copy_oftype(M.data, promote_op(+,TM,TI))
-	for ci in CartesianIndices(lsize(M))
-		R[ci,ci] += II.λ
-	end
-	return MultiMatrix(R, Val{spaces(M)}; checkspaces = false)
+# Can only add or subtract I if the MultiMatrix is square
+function +(M::MultiMatrix{S,S}, II::UniformScaling{TI}) where {S} where {TI<:Number}
+	square(M)
+	R = LinearAlgebra.copy_oftype(M.data, promote_op(+, TI, eltype(M)))
+	@diagonal_op M iR R[iR] += II.λ
+	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
 end
 (+)(II::UniformScaling, M::MultiMatrix) = M + II
 
-function -(M::MultiMatrix{S,TM} where {S}, II::UniformScaling{TI}) where {TM,TI}
-	chk_square(M)
-	R = LinearAlgebra.copy_oftype(M.data, promote_(-,TM,TI))
-	for ci in CartesianIndices(lsize(M))
-		R[ci,ci] -= II.λ
-	end
-	return MultiMatrix(R, Val{spaces(M)}; checkspaces = false)
+function -(M::MultiMatrix{S,S}, II::UniformScaling{TI}) where {S} where {TI<:Number}
+	square(M)
+	R = LinearAlgebra.copy_oftype(M.data, promote_op(-, eltype(M), TI))
+	@diagonal_op M iR R[iR] -= II.λ
+	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
 end
 
-function -(II::UniformScaling{TI}, M::MultiMatrix{S,TM} where {S}) where {TM,TI<:Number}
-	chk_square(M)
-	R = LinearAlgebra.copy_oftype(M.data, promote_op(-,TI,TM))
-	for ci in CartesianIndices(lsize(M))
-		R[ci,ci] = II.λ - R[ci,ci]
-	end
-	return MultiMatrix(R, Val{spaces(M)}; checkspaces = false)
+# NOTE:  This assumes x - A = x + (-A).
+function -(II::UniformScaling{TI}, M::MultiMatrix{S,S}) where {S} where {TI<:Number}
+	square(M)
+	R = LinearAlgebra.copy_oftype(-M.data, promote_op(-, TI, eltype(M)))
+	@diagonal_op M iR R[iR] += II.λ
+	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
 end
 
 *(M::MultiMatrix, II::UniformScaling) = M * II.λ
