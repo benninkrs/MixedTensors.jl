@@ -43,7 +43,7 @@ using Base.Broadcast: Broadcasted, BroadcastStyle
 
 using Base: promote_op
 
-import Base: show
+import Base: display, show
 import Base: ndims, length, size, axes, similar
 import Base: reshape, permutedims, adjoint, transpose, Matrix, ==
 import Base: getindex, setindex!
@@ -70,10 +70,9 @@ const IntSet = UInt128
 """
 	MultiMatrix{LS, RS, T, N, A<:AbstractArray{T,N}}	(struct)
 
-A `MultiMatrix` represents a linear map between vector spaces on its left and right,
-each of which is generally a tensor product space.
-`LS` specifies the vector spaces acted upon on the left; `RS` specifies the vector
-spaces acted upon on the right.
+A `MultiMatrix` represents a linear map between products of vector spaces.
+`LS` and `RS` are wide unsigned integers whose bits specify the "left" and "right" vector
+spaces, respectively.
 """
 struct MultiMatrix{LS, RS, T, N, A<:AbstractArray{T,N}, NL, NR} <: AbstractArray{T,N}
 	data::A
@@ -82,20 +81,25 @@ struct MultiMatrix{LS, RS, T, N, A<:AbstractArray{T,N}, NL, NR} <: AbstractArray
 	rdims::Dims{NR}		# dims of A corresponding to the ordered right spaces
 								#	(a permutation of NL+1:NL+NR)
 
-	# Constructor with partial validation of inputs
+	# Primary inner constructor. Validates inputs
 	# TODO - check that ldims and rdims have valid values?
-	function MultiMatrix{LS, RS, T, N, A}(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}) where {LS, RS, NL, NR} where {A<:AbstractArray{T,N}} where {T,N}
+	function MultiMatrix{LS, RS}(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}) where {LS, RS, NL, NR} where {A<:AbstractArray{T,N}} where {T,N}
 		count_ones(LS) == NL || error("length(ldims) must equal count_ones(LS)")
 		count_ones(RS) == NR || error("length(rdims) must equal count_ones(RS)")
+		# isperm((ldims...,rdims...)) || error("ldims and rdims must form a permutaiton of the array's dimensions")
 		NL + NR == N || error("ndims(A) must be equal the total number of spaces (left + right)")
 		return new{LS, RS, T, N, A, NL, NR}(data, ldims, rdims)
 	end
+
+	# Shortcut constructor: construct from array, using another MultiMatrix's metadata.
+	# By ensuring the array has the right number of dimensions, no input checking is needed.
+	function MultiMatrix(arr::A_, M::MultiMatrix{LS,RS,T,N,A,NL,NR}) where {A_ <: AbstractArray{T_,N}} where {T_} where {LS,RS,T,N,A,NL,NR}
+		return new{LS,RS,T_,N,A_,NL,NR}(arr, M.ldims, M.rdims)
+	end
+
 end
 
 # Convenience constructors
-
-# Construct from array when the space parameters are known
-MultiMatrix{LS,RS}(arr::A, ldims, rdims) where {LS,RS} where {A <: AbstractArray{T,N}} where {T,N} = MultiMatrix{LS,RS,T,N,A}(arr, ldims, rdims)
 
 # Construct from array with default spaces
 """
@@ -109,6 +113,10 @@ If omitted, `spaces` is taken to be `(1,...,ndims(A)/2)`.
 `rspaces` defaults to `lspaces`.
 `length(lspaces) + length(rspaces)` must equal `ndims(A)`.
 
+	MultiMatrix(A::AbstractArray, M::MultiMatrix)
+
+uses the spaces from `M`, provided ndims(A) == ndims(M).
+
  To construct a MultiMatrix with default left spaces and no right spaces, use
  [`multivector(A)`](@ref).
 """
@@ -116,7 +124,7 @@ function MultiMatrix(arr::A) where A<:AbstractArray{T,N} where {T,N}
 	iseven(N) || error("Source array must have an even number of dimensions")
 	M = N >> 1
 	LS = IntSet(N-1)		# trick to create 001⋯1 with M ones
-	MultiMatrix{LS,LS,T,N,A}(arr, oneto(M), tupseq(M_1,2*M))
+	MultiMatrix{LS,LS}(arr, oneto(M), tupseq(M+1,2*M))
 end
 
 
@@ -130,7 +138,7 @@ MultiMatrix(arr, lspaces::Dims, rspaces::Dims) = MultiMatrix(arr, Val{lspaces}, 
 function MultiMatrix(arr::A, ::Type{Val{S}}) where {S} where A<:AbstractArray{T,N} where {T,N}
 	perm = sortperm(S)
 	SI = binteger(IntSet, Val{S})
-	MultiMatrix{SI,SI,T,N,A}(arr, perm, perm .+ length(S))
+	MultiMatrix{SI,SI}(arr, perm, perm .+ length(S))
 end
 
 function MultiMatrix(arr::A, ::Type{Val{Lspaces}}, ::Type{Val{Rspaces}}) where {Lspaces, Rspaces} where A<:AbstractArray{T,N} where {T,N}
@@ -138,7 +146,7 @@ function MultiMatrix(arr::A, ::Type{Val{Lspaces}}, ::Type{Val{Rspaces}}) where {
 	rdims = sortperm(Rspaces) .+ length(Lspaces)
 	LS = binteger(IntSet, Val{Lspaces})
 	RS = binteger(IntSet, Val{Rspaces})
-	MultiMatrix{LS,RS,T,N,A}(arr, ldims, rdims)
+	MultiMatrix{LS,RS}(arr, ldims, rdims)
 end
 
 
@@ -158,8 +166,8 @@ Create a MultiMatrix with the same data as `M` but acting on different spaces.
 (M::MultiMatrix)(spaces::Vararg{Int64}) = M(spaces)
 
 (M::MultiMatrix)(spaces::Dims) = MultiMatrix(M.data, Val{spaces})
-(M::MultiMatrix)(lspaces::Dims, rspaces::Dims) where {N} = MultiMatrix(M.data, Val{lspaces}, Val{rspaces})
 (M::MultiMatrix)(::Type{Val{S}}) where {S} = MultiMatrix(M.data, Val{S})
+(M::MultiMatrix)(lspaces::Dims, rspaces::Dims) where {N} = MultiMatrix(M.data, Val{lspaces}, Val{rspaces})
 (M::MultiMatrix)(::Type{Val{LS}}, ::Type{Val{RS}}) where {LS,RS} = MultiMatrix(M.data, Val{LS}, Val{RS})
 
 
@@ -189,7 +197,7 @@ rspace_int(M::MultiMatrix{LS, RS}) where {LS,RS} = RS
 nlspaces(M::MultiMatrix{LS, RS, T, N, A, NL, NR}) where {LS, RS, T, N, A, NL, NR} = NL
 nrspaces(M::MultiMatrix{LS, RS, T, N, A, NL, NR}) where {LS, RS, T, N, A, NL, NR} = NR
 
-# Return the spaces in order
+# Return the spaces in array order
 spaces(M::MultiMatrix) = (lspaces(M), rspaces(M))
 lspaces(M::MultiMatrix{LS}) where {LS} = invpermute(findnzbits(LS), M.ldims)
 rspaces(M::MultiMatrix{LS, RS, T, N, A, NL, NR}) where {LS, RS, T, N, A, NL, NR} = invpermute(findnzbits(RS), M.rdims .- NL)
@@ -228,9 +236,24 @@ calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1
 
 calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
 
-# # TODO
-# function show(M::MultiMatrix)
-# end
+
+size2string(d) = isempty(d) ? "0-dim" :
+                 length(d) == 1 ? "length-$(d[1])" :
+                 join(map(string,d), '×')
+
+display(M::MultiMatrix) = show(M)
+
+function show(io::IO, M::MultiMatrix)
+	# print as usual
+	print(io, size2string(size(M.data)), " ")
+	print(io, "MultiMatrix{", lspaces(M), "⟷", rspaces(M), ", ", arraytype(M), "}")
+
+	if !isempty(M.data)
+		println(io, ':')
+		Base.print_array(IOContext(io, :compact => true, :typeinfo => eltype(M.data)), M.data)
+	end
+end
+
 
 # # Return the type of an array
 # function promote_arraytype(A::MultiMatrix, B::MultiMatrix)
@@ -294,7 +317,7 @@ end
 	else
 		# permute the dims and try again
 		arr = permutedims(M.data, (M.ldims..., M.rdims...))
-		square(MultiMatrix{LS,LS,T,N,A}(arr, oneto(NS), tupseq(NS+1, 2*NS)))
+		square(MultiMatrix{LS,LS}(arr, oneto(NS), tupseq(NS+1, 2*NS)))
 	end
 end
 
@@ -328,35 +351,110 @@ into the first (second) dimension of the output matrix.
 Matrix(M::MultiMatrix) = reshape(M.data, prod(lsize(M)), prod(rsize(M)) )
 
 
+# ------------------------
 # Array access
+
+
 # If accessing a single element, return that element.
-# Otherwise (i.e. if requesting a range) return a MultiMatrix.
 getindex(M::MultiMatrix, i::Vararg{Union{Integer, CartesianIndex}}) = getindex(M.data, i...)
-getindex(M::MultiMatrix, i...) = MultiMatrix(getindex(M.data, i...))
+
+
+# Otherwise (i.e. if requesting a range) return a MultiMatrix.
+function getindex(M::MultiMatrix, idx...)
+	I = to_indices(M.data, idx)
+	NL = nlspaces(M)
+	NR = nrspaces(M)
+	lkeep = map(i -> !isa(i, Integer), I[1:NL])
+	rkeep = map(i -> !isa(i, Integer), I[NL+1:NL+NR])
+
+	(LS_, RS_) = getindex_spaces(M, idx)
+	NL_ = count_ones(LS_)
+	NR_ = count_ones(RS_)
+
+	ldims__ = _getindex_dims(lspace_int(M), M.ldims, lkeep)
+	ldims_ = ntuple(i->ldims__[i], Val(NL_))
+
+	rdims__ = _getindex_dims(rspace_int(M), M.rdims, rkeep, NL, NL_)
+	rdims_ = ntuple(i->rdims__[i], Val(NR_))
+	MultiMatrix{LS_,RS_}(getindex(M.data, idx...), ldims_, rdims_)
+end
 
 setindex!(M::MultiMatrix, i...) = setindex!(M.data, i...)
 
+# Helper functions
+
+# Cacluate the spaces that remain when indexing a MultiMatrix
+function getindex_spaces(M::MultiMatrix, idx)
+	NL = nlspaces(M)
+	NR = nrspaces(M)
+	I =  to_indices(M.data, idx)
+	length(I) == ndims(M) || error("Wrong number of indices")
+	lidx = ntuple(i->idx[i], Val(NL))
+	ridx = ntuple(i->idx[i+NL], Val(NR))
+
+	LS_ = _getindex_spaces(Val{lspace_int(M)}, lidx...)
+	RS_ = _getindex_spaces(Val{rspace_int(M)}, ridx...)
+	(LS_, RS_)
+end
+
+_getindex_spaces(::Type{Val{S}}) where {S} = IntSet(0)
+
+function _getindex_spaces(::Type{Val{S}}, ::Integer, idx...) where {S}
+	nz = trailing_zeros(S)
+	mask = IntSet(1) << nz
+	# @info "$S skip $mask"
+	_getindex_spaces(Val{S ⊻ mask}, idx...)
+end
+
+function _getindex_spaces(::Type{Val{S}}, notint, idx...) where {S}
+	nz = trailing_zeros(S)
+	mask = IntSet(1) << nz
+ 	# @info "$S keep $mask"
+	return mask | _getindex_spaces(Val{S ⊻ mask}, idx...)
+end
+
+@inline function _getindex_dims(S, dims, keep, off1 = 0, off2 = 0)
+	i = 1
+	j = 0
+	nz = trailing_zeros(S)
+	cumdims = cumsum(keep)
+	dims_ = MVector{length(keep), Int}(undef)
+	@inbounds for i in eachindex(keep)
+		if keep[i]
+			j += 1
+			dims_[j] = cumdims[dims[i] - off1] + off2
+		end
+		S = xor(S, 1 << nz)
+		nz = trailing_zeros(S)
+	end
+	return dims_
+end
+
+
+#-----------------------
 
 reshape(M::MultiMatrix, shape::Dims) = MultiMatrix(reshape(M.data, shape), lspaces(M), rspaces(M))
-permutedims(M::MultiMatrix{LS,RS,T,N,A}, ord) where {LS,RS,T,N,A} = MultiMatrix{LS,RS,T,N,A}(permutedims(M.data, ord), M.ldims, M.rdims)
+permutedims(M::MultiMatrix, ord) = MultiMatrix(permutedims(M.data, ord), M)
 
 
 # TODO: Make a lazy wrapper, just like Base does.
 # Note, "partial adjoint" doesn't really make sense.
-function adjoint(M::MultiMatrix)
+function adjoint(M::MultiMatrix{LS,RS}) where {LS,RS}
 	NL = nlspaces(M)
 	NR = nrspaces(M)
 	perm = ntuple(i -> i <= NR ? NL+i : i-NL, Val{NL+NR})
 	# adjoint is called element-by-element (i.e. it recurses as required)
-	return MultiMatrix(permutedims(adjoint.(M.data), perm), M.rdims .- NL, M.ldims .+ NL)
+	return MultiMatrix{RS,LS}(permutedims(adjoint.(M.data), perm), M.rdims .- NL, M.ldims .+ NL)
 end
 
 
 #Swap left and right dimensions of a MultiMatrix
-function transpose(M::MultiMatrix{LS,RS,T,N,A,NL,NR}) where {LS,RS,T,N,A,NL,NR}
+function transpose(M::MultiMatrix{LS,RS}) where {LS,RS}
+	NL = nlspaces(M)
+	NR = nrspaces(M)
 	#perm = ntuple(i -> i <= NR ? NL+i : i-NL, Val{NL+NR})
 	perm = (tupseq(NL+1, NL+NR)..., oneto(Val{NL})...)
-	return MultiMatrix{RS,LS,T,N,A}(permutedims(M.data, perm), M.rdims .- NR, M.ldims .+ NR)
+	return MultiMatrix{RS,LS}(permutedims(M.data, perm), M.rdims .- NR, M.ldims .+ NR)
 end
 
 
@@ -368,7 +466,7 @@ end
 # Partial transpose
 transpose(M::MultiMatrix, ts::Int) = transpose(M, Val{(ts,)})
 transpose(M::MultiMatrix, ts::Dims) = transpose(M, Val{ts})
-function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS, RS, T, N, A, tspaces}
+function transpose(M::MultiMatrix{LS,RS}, ::Type{Val{tspaces}}) where {LS, RS, tspaces}
 	# This is harder with possibly different left and right spaces
 
 	# NL = nlspaces(M)
@@ -393,7 +491,7 @@ function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS,
 		rperm = setindex(M.rdims, ltdims, rtrans)
 		# @info lperm, rperm
 		arr = permutedims(M.data, (lperm..., rperm...))
-		return MultiMatrix{LS,RS,T,N,A}(arr, M.ldims, M.rdims)
+		return MultiMatrix{LS,RS}(arr, M.ldims, M.rdims)
 	else
 		ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
 		rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
@@ -418,7 +516,7 @@ function transpose(M::MultiMatrix{LS,RS,T,N,A}, ::Type{Val{tspaces}}) where {LS,
 		rdims_ = invpermute((rkept..., rnew...), oneto(Val{count_ones(RS_)}))
 
 		arr = permutedims(M.data, perm)
-		return MultiMatrix{LS_,RS_,T,N,A}(arr, ldims_, rdims_)
+		return MultiMatrix{LS_,RS_}(arr, ldims_, rdims_)
 		# @info typeof(M_)
 		# @info findnzbits(lspace_int(M_)), findnzbits(rspace_int(M_))
 	end
@@ -541,7 +639,7 @@ function tr(M::MultiMatrix{LS,RS}, ::Type{Val{tspaces}}) where {LS,RS,tspaces}
 	sz = size(M.data)
 	R = similar(M.data, (sz[lkdims]..., sz[rkdims]...))
 	trace!(1, M.data, :N, 0, R, lkdims, rkdims, ltdims, rtdims)
-	return MultiMatrix{KLS, KRS, eltype(R), N, typeof(R)}(R, oneto(NL), tupseq(NL+1, NL+NR))
+	return MultiMatrix{KLS, KRS}(R, oneto(NL), tupseq(NL+1, NL+NR))
 end
 
 
@@ -550,27 +648,27 @@ end
 #
 
 # Can only add or subtract I if the MultiMatrix is square
-function +(M::MultiMatrix{S,S}, II::UniformScaling{TI}) where {S} where {TI<:Number}
+function +(M::MultiMatrix, II::UniformScaling)
 	square(M)
-	R = LinearAlgebra.copy_oftype(M.data, promote_op(+, TI, eltype(M)))
+	R = LinearAlgebra.copy_oftype(M.data, promote_op(+, eltype(II), eltype(M)))
 	@diagonal_op M iR R[iR] += II.λ
-	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
+	return MultiMatrix(R, M)
 end
 (+)(II::UniformScaling, M::MultiMatrix) = M + II
 
-function -(M::MultiMatrix{S,S}, II::UniformScaling{TI}) where {S} where {TI<:Number}
+function -(M::MultiMatrix, II::UniformScaling)
 	square(M)
-	R = LinearAlgebra.copy_oftype(M.data, promote_op(-, eltype(M), TI))
+	R = LinearAlgebra.copy_oftype(M.data, promote_op(-, eltype(M), eltype(II)))
 	@diagonal_op M iR R[iR] -= II.λ
-	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
+	return MultiMatrix(R, M)
 end
 
 # NOTE:  This assumes x - A = x + (-A).
-function -(II::UniformScaling{TI}, M::MultiMatrix{S,S}) where {S} where {TI<:Number}
+function -(II::UniformScaling, M::MultiMatrix)
 	square(M)
-	R = LinearAlgebra.copy_oftype(-M.data, promote_op(-, TI, eltype(M)))
+	R = LinearAlgebra.copy_oftype(-M.data, promote_op(-, eltype(II), eltype(M)))
 	@diagonal_op M iR R[iR] += II.λ
-	return MultiMatrix{S,S}(R, M.ldims, M.rdims)
+	return MultiMatrix(R, M)
 end
 
 *(M::MultiMatrix, II::UniformScaling) = M * II.λ
@@ -581,21 +679,21 @@ end
 #
 # Arithmetic operations
 #
--(M::MultiMatrix) = MultiMatrix(-M.data, Val{spaces(M)}; checkspaces = false)
+-(M::MultiMatrix) = MultiMatrix(-M.data, M)
 
 # Fallback methods (when x is not an abstract array or number)
-*(M::MultiMatrix, x) = MultiMatrix(M.data * x, Val{spaces(M)}; checkspaces = false)
-*(x, M::MultiMatrix) = MultiMatrix(x * M.data, Val{spaces(M)}; checkspaces = false)
-/(M::MultiMatrix, x) = MultiMatrix(M.data / x, Val{spaces(M)}; checkspaces = false)
+*(M::MultiMatrix, x) = MultiMatrix(M.data * x, M)
+*(x, M::MultiMatrix) = MultiMatrix(x * M.data, M)
+/(M::MultiMatrix, x) = MultiMatrix(M.data / x, M)
 
-*(M::MultiMatrix, x::Number) = MultiMatrix(M.data * x, Val{spaces(M)}; checkspaces = false)
-*(x::Number, M::MultiMatrix) = MultiMatrix(x * M.data, Val{spaces(M)}; checkspaces = false)
-/(M::MultiMatrix, x::Number) = MultiMatrix(M.data / x, Val{spaces(M)}; checkspaces = false)
+*(M::MultiMatrix, x::Number) = MultiMatrix(M.data * x, M)
+*(x::Number, M::MultiMatrix) = MultiMatrix(x * M.data, M)
+/(M::MultiMatrix, x::Number) = MultiMatrix(M.data / x, M)
 
 # TODO:  Handle M .+ x and M .- x so that it returns a MultiMatrix
 
 
-
+# TODO -- HERE !!!
 function +(A::MultiMatrix, B::MultiMatrix)
 	if spaces(A) == spaces(B)
 		axes(A) == axes(B) || throw(DimensionMismatch("To add MultiMatrices on the same spaces, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))

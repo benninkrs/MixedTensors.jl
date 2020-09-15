@@ -1,7 +1,7 @@
 name = "MultiMatrices"
 uuid = "4f6a5be9-6cd1-4bca-9e4c-190b27da7509"
 authors = ["Ryan Bennink <benninkrs@ornl.gov>"]
-version = "0.3.3"
+version = "0.3.4"
 
 [deps]
 BitIntegers = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
