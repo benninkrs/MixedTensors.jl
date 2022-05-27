@@ -37,7 +37,7 @@ using MiscUtils
 using SuperTuples
 using StaticArrays
 using LinearAlgebra
-using TensorOperations: trace!, contract!
+using TensorOperations: trace!, contract!, tensoradd!
 using Base.Broadcast: Broadcasted, BroadcastStyle
 # using PermutedIteration
 
@@ -220,6 +220,7 @@ rsize(M::MultiMatrix) = ntuple(d -> size(M.data, d+nlspaces(M)), Val(nrspaces(M)
 rsize(M::MultiMatrix, dim) =  size(M.data, dim + nlspaces(M))
 rsize(M::MultiMatrix, dim::Iterable) =  map(d -> size(M.data, d + nspaces(M)), dims)
 
+# Not sure laxes and raxes are really necessary
 laxes(M::MultiMatrix) = ntuple(d -> axes(M.data, d), Val(nlspaces(M)))
 laxes(M::MultiMatrix, dim) = axes(M.data, dim)
 laxes(M::MultiMatrix, dims::Iterable) = map(d -> axes(M.data, d), dims)
@@ -234,7 +235,7 @@ arraytype(::MultiMatrix{LS,RS,T,N,A} where {LS,RS,T,N}) where A = A
 calc_strides(sz::Dims{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : sz[i-1], Val(N)))
 calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1]) - first(ax[i-1]) + 1, Val(N)))
 
-calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
+@inline calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
 
 
 size2string(d) = isempty(d) ? "0-dim" :
@@ -459,10 +460,8 @@ end
 
 
 ##------------------------
-# The following functions take space labels (not dimensions, or indices of spaces)
-# as arguments.
+# The following functions take spaces (not dimensions) as arguments.
 
-# TODO: --- THIS IS WHERE I AM WORKING
 # Partial transpose
 transpose(M::MultiMatrix, ts::Int) = transpose(M, Val{(ts,)})
 transpose(M::MultiMatrix, ts::Dims) = transpose(M, Val{ts})
@@ -692,50 +691,54 @@ end
 
 # TODO:  Handle M .+ x and M .- x so that it returns a MultiMatrix
 
-
-# TODO -- HERE !!!
-function +(A::MultiMatrix, B::MultiMatrix)
-	if spaces(A) == spaces(B)
-		axes(A) == axes(B) || throw(DimensionMismatch("To add MultiMatrices on the same spaces, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-		return MultiMatrix(A.data + B.data, Val{spaces(A)}; checkspaces = false)
-	# TODO: elseif spaces are the same, but in different order ...
+# TODO - HERE IS WHERE I AM WORKING.  CAN IT BE FASTER?
+function +(A::MultiMatrix{LS,RS}, B::MultiMatrix{LS,RS}) where {LS,RS}
+	if A.ldims == B.ldims && A.rdims == B.rdims
+		# Same spaces in the same order
+		return MultiMatrix(A.data + B.data, A)
 	else
-		error("Not implemented")
-		return add_different(A, B)
+		# Same spaces in different order
+		NL = nlspaces(A)
+		NR = nrspaces(A)
+
+		# Same code as in ==. Should we make a macro?
+		Adims = (A.ldims..., A.rdims...)
+		Bdims = (B.ldims..., B.rdims...)
+
+		BinA = Adims[invperm(Bdims)]
+
+		Rdata = A.data .+ permutedims(B, BinA)
+		return MultiMatrix(Rdata, A)
+		# Rdata = copy(A.data)
+		# tensoradd!(1, B.data, Bdims, 1, Rdata, Adims)
+
+		# This is slower
+		# Astrides = calc_strides(axes(A))[Adims]
+		# Bstrides = calc_strides(axes(B))[Bdims]
+		#
+		# axR = axes(A)[Adims]
+		# Rtype = promote_type(arraytype(A), arraytype(B))
+		# szR = map(a->last(a)-first(a)+1, axR)
+		# # szR = ntuple(i -> last(axR[i])-first(axR[i])+1, Val(ndims(A)))
+		# Rdata = Rtype(undef, szR)
+		#
+		# @inbounds for ci in CartesianIndices(axR)
+		# 	iA = calc_index(ci, Astrides)
+		# 	iB = calc_index(ci, Bstrides)
+		# 	Rdata[ci] = A[iA] + B[iB]
+		# end
+
+		# TODO: Define a simplified constructor for this?
+		#			Would using Val() in tupseq help?
+		# return MultiMatrix{LS,RS}(Rdata, oneto(NL), tupseq(NL+1, NL+NR))
 	end
 end
-
-#
-# function add_different(A::MultiMatrix, B::MultiMatrix)
-# 	SA = spaces(A)
-# 	SB = spaces(B)
-# 	(SRv, AinR, BinR) = indexed_union(SA, SB)
-#
-# 	SR = tuple(SRv)
-#
-# 	A = promote_type(arraytype(A), arraytype(B))
-#
-# 	C = MultiMatrix{SR, eltype(A), A
-#
-# 	return _add_different(A, B, SR, AinR, BinR)
-# end
-#
-# function _add_different(A::MultiMatrix, B::MultiMatrix, SR,
-# 	# AinC = indices of A in C
-# 	# BinC = inices of B in C
-#
-# 	#for iC in CartesianIndices(
-# 	#	for jC in CartisianIndices
-# 	#C[iC] = A[iC[AinC]] + B[iC[BinC]]
-# 	#
-# 	#
-# end
 
 
 function -(A::MultiMatrix, B::MultiMatrix)
 	spaces(A) == spaces(B) || error("To subtract MultiMatrices, they must have the same spaces in the same order")
 	axes(A) == axes(B) || throw(DimensionMismatch("To subtract MultiMatrices, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-	return MultiMatrix(A.data - B.data, Val{spaces(A)}; checkspaces = false)
+	return MultiMatrix(A.data - B.data, Val{lspaces(A)}, Val{rspaces(A)})
 end
 
 # Matrix multiplication.  These methods are actually quite fast -- about as fast as the
@@ -753,22 +756,23 @@ size of the result depends on the `rsize(M)`.
 *(M::MultiMatrix, A::AbstractArray{TA,1}) where {TA} = _mult_MA(M, A)
 *(M::MultiMatrix, A::AbstractArray{TA,2}) where {TA} = _mult_MA(M, A)
 
-function _mult_MA(M::MultiMatrix, A::AbstractArray{TA}) where {TA}
-	n = nspaces(M)
-	S = spaces(M)
-	raxes(M) == axes(A, S) || throw(DimensionMismatch("raxes(M) must equal axes(B, spaces(A))"))
+function _mult_MA(M::MultiMatrix, A::AbstractArray)
+	nl = nlspaces(M)
+	nr = nrspaces(M)
+	S = rspaces(M)
+	raxes(M) == axes(A, S) || throw(DimensionMismatch("raxes(M) must equal axes(B, rspaces(A))"))
 
 	nR = max(ndims(A), maximum(S))
-	kdimsA = deleteat(oneto(nR), S)
+	odimsA = deleteat(oneto(nR), S)
 
 	szR = MVector(size(A, oneto(nR)))
 	lszM = lsize(M)
-	for i = 1:n
+	for i = 1:nl
 		szR[S[i]] = lszM[i]
 	end
-	TR = promote_op(*, eltype(M), TA)
+	TR = promote_op(*, eltype(M), eltype(A))
 	R = similar(A, TR, Tuple(szR))
-	contract!(one(eltype(M)), M.data, :N, A, :N, zero(TR), R, oneto(n), tupseq(n+1,2*n), kdimsA, S, invperm((S...,kdimsA...)))
+	contract!(one(eltype(M)), M.data, :N, A, :N, zero(TR), R, oneto(nl), tupseq(nl+1,nl+nr), odimsA, S, invperm((S...,odimsA...)))
 	return R
 end
 #*(M::MultiMatrix, A::AbstractArray{TA,1}) where {TA} =
@@ -778,7 +782,7 @@ end
 *(A::AbstractArray{TA,2}, M::MultiMatrix) where {TA} = _mult_AM(A, M)
 
 # This is almost identical to the M*A version.
-function _mult_AM(A::AbstractArray{TA}, M::MultiMatrix) where {TA}
+function _mult_AM(A::AbstractArray, M::MultiMatrix)
 	n = nspaces(M)
 	S = spaces(M)
 	laxes(M) == axes(A, S) || throw(DimensionMismatch("axes(A, spaces(B)) must equal laxes(B)"))
@@ -791,7 +795,7 @@ function _mult_AM(A::AbstractArray{TA}, M::MultiMatrix) where {TA}
 	for i = 1:n
 		szR[S[i]] = rszM[i]
 	end
-	TR = promote_op(*, eltype(M), TA)
+	TR = promote_op(*, eltype(M), eltype(A))
 	R = similar(A, TR, Tuple(szR))
 	contract!(one(eltype(M)), M.data, :N, A, :N, zero(TR), R, tupseq(n+1,2*n), oneto(n), kdimsA, S, invperm((S...,kdimsA...)))
 	return R
@@ -802,27 +806,27 @@ end
 `A*B` where `A` and `B` are MultiMatrices.
 """
 function *(A::MultiMatrix, B::MultiMatrix)
-	Atype = arraytype(A).name.wrapper
-	Btype = arraytype(B).name.wrapper
-	Atype == Btype || error("To multiply MultiMatrices, the underlying array types must be the same.  Had types $Atype and $Btype")
+	#Atype = arraytype(A).name.wrapper
+	#Btype = arraytype(B).name.wrapper
+	#Atype == Btype || error("To multiply MultiMatrices, the underlying array types must be the same.  Had types $Atype and $Btype")
 	lszA = lsize(A)
 	rszA = rsize(A)
 	lszB = lsize(B)
 	rszB = rsize(B)
 
-	nA = nspaces(A)
-	nB = nspaces(B)
-	SA = spaces(A)
-	SB = spaces(B)
+	#nA = nspaces(A)
+	#nB = nspaces(B)
+	rSA = rspaces(A)
+	lSB = lspaces(B)
 
-	if SA == SB
-		# Simple case:  spaces(A) = spaces(B)
+	if rSA == lSB
+		# Simple case:  rspaces(A) = lspaces(B)
 		raxes(A) == laxes(B) || throw(DimensionMismatch("raxes(A) = $(raxes(A)) must equal laxes(B) = $(laxes(B))"))
-		R = reshape(Matrix(A) * Matrix(B), tcat(lszA, rszB))
-		return MultiMatrix(R, Val{SA}; checkspaces = false)
+		R = reshape(Matrix(A) * Matrix(B), tcat(lspaces(A), rspaces(B)))
+		return MultiMatrix(R, Val{lspaces(A)}, Val{rspaces(B)})
 	else
 		# General case
-		(tdimsA, tdimsB, odimsA, odimsB, dimsR, SR) = get_mult_dims(Val{spaces(A)}, Val{spaces(B)})
+		(tdimsA, tdimsB, odimsA, odimsB, ldimsR, rdimsR, LSR, RSR) = get_mult_dims(Val{lspaces(A)}, Val{rspaces(A)}, Val{lspaces(B)}, Val{rspaces(B)})
 		# println("tdims A,B = $tdimsA <--> $tdimsB")
 		# println("odimsA = $odimsA")
 		# println("odimsB = $odimsB")
@@ -832,69 +836,91 @@ function *(A::MultiMatrix, B::MultiMatrix)
 		axes(A, tdimsA) == axes(B, tdimsB) || throw(DimensionMismatch("raxes(A) must equal laxes(B) on spaces common to A,B"))
 
 		szAB = tcat(size(A, odimsA), size(B, odimsB))
-		szR = szAB[dimsR]
-		#println("sizeR = $szR")
-		#TR = promote_type(TA, TB)
-		#szR = (lszA[kdimsA]..., lszB[kdimsB])
+		szR = szAB[tcat(ldimsR, rdimsR)]
+
 		TR = promote_op(*, eltype(A), eltype(B))
-		R = Atype{TR}(undef, szR)
-		contract!(one(eltype(A)), A.data, :N, B.data, :N, zero(TR), R, odimsA, tdimsA, odimsB, tdimsB, dimsR)
-		return MultiMatrix(R, Val{SR}; checkspaces = false)
+		R = Array{TR}(undef, szR)
+		# println("tdimsA = ", tdimsA)
+		# println("odimsA = ", odimsA)
+		# println("tdimsB = ", tdimsB)
+		# println("odimsB = ", odimsB)
+		# println("ldimsR = ", ldimsR)
+		# println("rdimsR = ", rdimsR)
+		# println("LSR, RSR = ", LSR, RSR)
+		contract!(one(eltype(A)), A.data, :N, B.data, :N, zero(TR), R, odimsA, tdimsA, odimsB, tdimsB, ldimsR, rdimsR, nothing)
+		return MultiMatrix(R, Val{LSR}, Val{RSR})
 		#return nothing
 	end
 end
 
 
+# Given lspaces(A), rspaces(A), lspaces(B), rspaces(B), determine the indices for contraction
 
-@generated function get_mult_dims(::Type{Val{SA}}, ::Type{Val{SB}}) where {SA,SB}
+@generated function get_mult_dims(::Type{Val{LSA}}, ::Type{Val{RSA}}, ::Type{Val{LSB}}, ::Type{Val{RSB}}) where {LSA,RSA,LSB,RSB}
 	# Example:
-	#    C[o1,o2,o3,o4; o1_,o2_,o3_,o4_] = A[o1, o2, o3; o1_, c2_, c3_] * B[c2, c3, o4; o2_, o3_, o4_]
-	# itsa, itsb = indices of contracted spaces of A, B
-	# iosa, iosb = indices of open spaces of A, B
+	#    C[o1,o2,o3,o4; o1_,o2_,o3_] = A[o1, o2, o3; o1_, c1, c2] * B[c1, o4, c2; o2_, o3_]
+	# itsa, iosa = indices of contracted, open) right spaces of A = (2,3), (1,)
+	# itsb, iosb = indicices of contracted, open left spaces of B = (1,3), (2,)
+	
 	# odimsA = 1:nA, nA+iosa
 	# tdimsA = nA + itsa
 	# tdimsB = itsb
 	# odimsB = iosb, nB+(1:nB)
 
-	nA = length(SA)
-	nB = length(SB)
-	tsa_ = MVector{nA,Int}(undef)
-	tsb_ = MVector{nB,Int}(undef)
-	osa_mask = @MVector ones(Bool, nA)
-	osb_mask = @MVector ones(Bool, nB)
+	# find the dimensions of A,B to be contracted
+	nlA = length(LSA)
+	nrA = length(RSA)
+	nlB = length(LSB)
+	nrB = length(RSB)
+	ita_ = MVector{nrA,Int}(undef)			# vector of right dims of A to be traced
+	itb_ = MVector{nlB,Int}(undef)			# vector of left dims of B to be traces
+	oa_mask = @MVector ones(Bool, nrA)		# mask for open right dims of A
+	ob_mask = @MVector ones(Bool, nlB)		# maks for open left dims of B
 
 	nt = 0
-	for i = 1:nA
-		for j = 1:nB
-	 		if SA[i] == SB[j]
+	for i = 1:nrA
+		for j = 1:nlB
+	 		if RSA[i] == LSB[j]
 				nt += 1
-	 			tsa_[nt] = i
-	 			tsb_[nt] = j
-				osa_mask[i] = false
-				osb_mask[j] = false
+	 			ita_[nt] = i
+	 			itb_[nt] = j
+				oa_mask[i] = false
+				ob_mask[j] = false
 	 		end
 	 	end
 	end
 
+	# indices into RSA and LSB of traced dimensions 
+	ita = Tuple(ita_)[oneto(nt)]
+	itb = Tuple(itb_)[oneto(nt)]
+	# dimensions to be traced
+	tdimsA = nlA .+ ita
+	tdimsB = itb
 
-	itsa = Tuple(tsa_)[oneto(nt)]
-	itsb = Tuple(tsb_)[oneto(nt)]
-	iosa = oneto(nA)[osa_mask]
-	iosb = oneto(nB)[osb_mask]
+	# indices into RSA and LSB of open dimensions
+	iora = oneto(nrA)[oa_mask]
+	iolb = oneto(nlB)[ob_mask]
+	
+	norA = nrA - nt		# number of open spaces of A
+	nolB = nlB - nt		# number of open spaces of B
 
-	nosA = nA - nt		# number of open spaces of A
-	nosB	= nB - nt		# number of open spaces of B
-	nR = nA + nB - nt	# = nA + noB = nB + noA)
-	tdimsA = nA .+ itsa
-	tdimsB = itsb
-	odimsA = tcat(oneto(nA), (nA .+ iosa))
-	odimsB = tcat(iosb, tupseq(nB+1, 2*nB))
+	odimsA = tcat(oneto(nlA), nlA .+ iora)
+	odimsB = tcat(iolb, tupseq(nlB+1, nlB+nrB))
 
-	# open spaces of A, common spaces, open spaces of B
-	nodA = nA + nosA
-	SR = tcat(SA[itsa], SA[iosa], SB[iosb])
-	dimsR = tcat(itsa, iosa, nodA .+ oneto(nosB), (nodA + nosB) .+ itsb, tupseq(nA+1, nA+nosA), (nodA + nosB) .+ iosb)
-	return :( ($tdimsA, $tdimsB, $odimsA, $odimsB, $dimsR, $SR) )
+
+	# dimensions of output R
+	LSR = tcat(LSA, LSB[iolb])
+	RSR = tcat(RSA[iora], RSB)
+
+	nlR = nlA + nolB
+	nrR = norA + nrB
+
+	nodA = length(odimsA)
+	# indices into tcat(odimsA, odimsB)
+	ldimsR = tcat(oneto(nlA), tupseq(nodA + 1, nodA + nolB))
+	rdimsR = tcat(tupseq(nlA + 1, nlA + norA), tupseq(nodA + nolB + 1, nodA + nolB + nrB)) 
+	#dimsR = tcat(itsa, iosa, nodA .+ oneto(nosB), (nodA + nosB) .+ itsb, tupseq(nA+1, nA+nosA), (nodA + nosB) .+ iosb)
+	return :( ($tdimsA, $tdimsB, $odimsA, $odimsB, $ldimsR, $rdimsR, $LSR, $RSR) )
 end
 
 
