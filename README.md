@@ -1,2 +1,2 @@
 # MultiMatrices.jl
-Implementation of multidimensional matrices (i.e., linear maps between tensor product spaces) in Julia.
+Matrices and vectrors in tensor product spaces
