@@ -449,9 +449,11 @@ end
 
 # If accessing a single element, return that element.
 """
-	Indexing a Tensor indexes the backing array.  If all the indices are scalars the result
-	is the specified array element.  Otherwise the result is a Tensor whose spaces are those
-	associated with the dimensions that were indexed by non-scalars.
+	getindex(T::Tensor, idx...)
+
+Indexing a Tensor indexes the backing array.  If all the indices are scalars the result
+is the specified array element.  Otherwise the result is a Tensor whose spaces are those
+associated with the dimensions that were indexed by non-scalars.
 """
 getindex(M::Tensor, i::Vararg{Union{Integer, CartesianIndex}}) = getindex(M.data, i...)
 
@@ -501,27 +503,38 @@ end
 
 
 #Swap left and right dimensions of a Tensor
+"""
+	transpose(T::Tensor)
+
+Transpose (swap the left and right spaces) of a tensor. 
+
+	transpose(T::Tensor, space)
+	transpose(T::Tensor, spaces...)
+
+Transpose selected spaces (partial transpose).  In general the resulting spaces
+will be put in sequential order. But if T does not involve the specified spaces,
+ `transpose` does nothing.
+"""
 function transpose(M::Tensor{LS,RS}) where {LS,RS}
 	NL = nlspaces(M)
 	NR = nrspaces(M)
 	#perm = ntuple(i -> i <= NR ? NL+i : i-NL, Val(NL+NR))
 	perm = (tupseq(NL+1, NL+NR)..., oneto(Val{NL})...)
-	return Tensor{RS,LS}(permutedims(M.data, perm), M.rdims .- NR, M.ldims .+ NR)
+	ldims_ = M.rdims .- NL
+	rdims_ = M.ldims .+ NR
+	# println(perm)
+	# println(ldims_)
+	# println(rdims_)
+	return Tensor{RS,LS}(permutedims(M.data, perm), ldims_, rdims_)
 end
 
-
-##------------------------
-# The following functions take spaces (not dimensions) as arguments.
-# SHOULD IT?  Might it be more convient to have transpose act on dimensions (not spaces)?
 
 # Partial transpose
 transpose(M::Tensor, ts::Int) = transpose(M, Val((ts,)))
 transpose(M::Tensor, ts::Dims) = transpose(M, Val(ts))
 function transpose(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS, RS, tspaces}
-	# This is harder with possibly different left and right spaces
-
-	# NL = nlspaces(M)
-	# NR = nrspaces(M)
+	NL = nlspaces(M)
+	NR = nrspaces(M)
 
 	TS = binteger(SpacesInt, Val(tspaces))
 	TSL = TS & LS		# transposed spaces on the left side
@@ -533,77 +546,51 @@ function transpose(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS, RS, tspaces}
 		return M
 	elseif TSL == TS && TSR == TS
 		# All the spaces are in both left and right.
-		# We just need to permute the ltrans and rtrans
-		ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
-		rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
-		ltdims = M.ldims[ltrans]
-		rtdims = M.rdims[rtrans]
-		lperm = setindex(M.ldims, rtdims, ltrans)
-		rperm = setindex(M.rdims, ltdims, rtrans)
-		# @info lperm, rperm
+		# We just need to permute the dimensions, the spaces stay the same
+		it_lspaces = findnzbits(TS, LS)		# indices of left spaces to be transposed (in space order)
+		it_rspaces = findnzbits(TS, RS)		# indices of right spaces to be transposed (in space order)
+		tldims = M.ldims[it_lspaces]			# left dimensions to be transposed (in space order)
+		trdims = M.rdims[it_rspaces]			# right dimensions to be transposed (in space order)
+		lperm = setindex(M.ldims, trdims, it_lspaces)		# the transposed spaces have the same order
+		rperm = setindex(M.rdims, tldims, it_rspaces)
 		arr = permutedims(M.data, (lperm..., rperm...))
-		return Tensor{LS,RS}(arr, M.ldims, M.rdims)
+		return Tensor{LS,RS}(arr, oneto(NL), tupseq(NL+1, NL+NR))
+		# lperm = setindex(oneto(NL), trdims, tldims)
+		# rperm = setindex(tupseq(NL+1,NL+NR), tldims, trdims .- NL)
+		# arr = permutedims(M.data, (lperm..., rperm...))
+		# return Tensor{LS,RS}(arr, M.ldims, M.rdims)
 	else
-		ltrans = findnzbits(TS, LS)		# indices of left spaces to be transposed
-		rtrans = findnzbits(TS, RS)		# indices of right spaces to be transposed
-		lkeep = findnzbits(~TS, LS)	# left spaces to keep as left
-		rkeep = findnzbits(~TS, RS)	# right spaces to keep as right
+		it_lspaces = findnzbits(TS, LS)		# indices of left spaces to be transposed
+		it_rspaces = findnzbits(TS, RS)		# indices of right spaces to be transposed
+		ik_lspaces = findnzbits(~TS, LS)		# indices of left spaces to keep as left
+		ik_rspaces = findnzbits(~TS, RS)		# indices of right spaces to keep as right
 
 		# new left and right spaces
 		LS_ = (LS & ~TS) | TSR
 		RS_ = (RS & ~TS) | TSL
+		NL_ = count_ones(LS_)
+		NR_ = count_ones(RS_)
 
-		# @info "new left spaces = $(findnzbits(LS_)), new right spaces = $(findnzbits(RS_))"
+		lsp = findnzbits(LS)
+		rsp = findnzbits(RS)
 
-		perm = (M.ldims[lkeep]..., M.rdims[rtrans]..., M.rdims[rkeep]..., M.ldims[ltrans]...)
+		lspaces_ = (lsp[ik_lspaces]..., rsp[it_rspaces]...)
+		lperm_ = sortperm(lspaces_)
+		ldims_ = (M.ldims[ik_lspaces]..., M.rdims[it_rspaces]...)		# dims of the new left spaces
+		lperm = ldims_[lperm_];
 
-		lnew = findnzbits(TSR & LS_)		# indices in LS_ of the swapped dimensions
-		lkept = findnzbits(~TSR & LS_)	# indices in LS_ of the kept dimensions
+		rspaces_ = (rsp[ik_rspaces]..., lsp[it_lspaces]...)
+		rperm_ = sortperm(rspaces_)
+		rperm = (M.rdims[ik_rspaces]..., M.ldims[it_lspaces]...)[rperm_];
 
-		rnew = findnzbits(TSL & RS_)		# indices in RS_ of the swapped dimensions
-		rkept = findnzbits(~TSL & RS_)	# indices in RS_ of the kept dimensions
-
-		ldims_ = invpermute((lkept..., lnew...), oneto(Val(count_ones(LS_))))
-		rdims_ = invpermute((rkept..., rnew...), oneto(Val(count_ones(RS_))))
-
+		perm = (lperm..., rperm...)
+		
 		arr = permutedims(M.data, perm)
-		return Tensor{LS_,RS_}(arr, ldims_, rdims_)
-		# @info typeof(M_)
-		# @info findnzbits(lspaces_int(M_)), findnzbits(rspaces_int(M_))
+		return Tensor{LS_,RS_}(arr, oneto(NL_), tupseq(NL_+1, NL_+NR_))
+
 	end
 end
 
-
-# Attempt to make the compiler infer the permutation order
-# function transpose2(M::Tensor, ts::Dims)
-# 	S = spaces(M)
-# 	order = get_transpose_order(Val(S}, Val{ts))
-# 	return Tensor(permutedims(M.data, order), S; checkspaces = false)
-# end
-#
-# @generated function get_transpose_order(::Val{S}, ::Val{ts}) where {S,ts}
-# 	n = length(S)
-# 	#d = findin(S, ts)	#find elements of S in ts
-# 	order = MVector{2*n, Int}(undef)
-# 	is_tdim = in.(S, Ref(ts))
-# 	for i = 1:n
-# 		#if d[i] > 0
-# 		if is_tdim[i]
-# 			order[i] = i+n
-# 			order[i+n] = i
-# 		else
-# 			order[i] = i
-# 			order[i+n] = i+n
-# 		end
-# 	end
-# 	return order
-# end
-
-
-# @generated function shared_spaces(A::Tensor{TA,SA}, B::Tensor{TB,SB}) where {TA,SA} where {TB,SB}
-# 	t = tuple(Iterators.filter(i-> in(i, SA), SB)...)
-# 	return :( $t )
-# end
 
 
 
