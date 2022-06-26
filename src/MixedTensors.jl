@@ -43,7 +43,7 @@ using MiscUtils
 using SuperTuples
 using StaticArrays
 using LinearAlgebra
-using TensorOperations: trace!, contract!, tensoradd!
+using TensorOperations: trace!, contract!, tensoradd!, scalar
 using Base.Broadcast: Broadcasted, BroadcastStyle
 using Base: tail
 
@@ -155,7 +155,7 @@ macro diagonal_op(M, Idx, Op)
 	escIdx = esc(Idx)
 	escOp = esc(Op)
 	quote
-		@warn "diagonal_op may not be correct for tensors with different left and right spaces"
+		#@warn "diagonal_op may not be correct for tensors with different left and right spaces"
 		if $escM.ldims == $escM.rdims .- nlspaces($escM)
 			# Perfectly square -- no permuting necessary
 			# sum along diagonal
@@ -447,6 +447,7 @@ function unindexed_dims(dims::Dims{N}, dkeep, ::Val{S}) where {N, S}
 	return (S_, dims_)
 end
 
+
 # If accessing a single element, return that element.
 """
 	getindex(T::Tensor, idx...)
@@ -606,12 +607,17 @@ Trace over the the indicated spaces, returning another `Tensor`.
 """
 tr(M::Tensor{LS,RS}) where {LS,RS} = error("To trace a Tensor, the left and right spaces must be the same (up to ordering).")
 function tr(M::Tensor{LS,LS}) where {LS}
-   ensure_square(M)# this is slower
+   ensure_square(M)
    s = zero(eltype(M))
+	# this is much faster than using TensorOperations.trace!
    @diagonal_op M iA s += M.data[iA]
    return s
 end
 
+# function tr2(M::Tensor{LS,LS}) where {LS}
+# 	T = eltype(M)
+# 	scalar(trace!(one(T), M.data, :N, zero(T), Array{T,0}(undef), (), (), M.ldims, M.rdims))
+# end
 
 # Partial trace.  It's not convenient to use a keyword because it clobbers the method
 # that doesn't have a spaces argument.
@@ -634,7 +640,6 @@ function tr(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS,RS,tspaces}
 		return tr(M)
 	end
 
-	# find dims to be traced and ktp
 
 	ltdims = M.ldims[findnzbits(TS, LS)]
 	rtdims = M.rdims[findnzbits(TS, RS)]
@@ -647,7 +652,8 @@ function tr(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS,RS,tspaces}
 	N = NL + NR
 	sz = size(M.data)
 	R = similar(M.data, (sz[lkdims]..., sz[rkdims]...))
-	trace!(1, M.data, :N, 0, R, lkdims, rkdims, ltdims, rtdims)
+	T = eltype(M)
+	trace!(one(T), M.data, :N, zero(T), R, lkdims, rkdims, ltdims, rtdims)
 	return Tensor{KLS, KRS}(R, oneto(NL), tupseq(NL+1, NL+NR))
 end
 
@@ -701,55 +707,72 @@ end
 
 # TODO:  Handle M .+ x and M .- x so that it returns a Tensor
 
-# TODO - HERE IS WHERE I AM WORKING.  CAN IT BE FASTER?
+# fallbaclk
++(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+
 function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
 	if A.ldims == B.ldims && A.rdims == B.rdims
 		# Same spaces in the same order
 		return Tensor(A.data + B.data, A)
 	else
 		# Same spaces in different order
-		NL = nlspaces(A)
-		NR = nrspaces(A)
-
 		# Same code as in ==. Should we make a macro?
 		Adims = (A.ldims..., A.rdims...)
 		Bdims = (B.ldims..., B.rdims...)
 
-		BinA = Adims[invperm(Bdims)]
+		BinA = Bdims[invperm(Adims)]
 
-		Rdata = A.data .+ permutedims(B, BinA)
+		Rdata = A.data + permutedims(B.data, BinA)
 		return Tensor(Rdata, A)
-		# Rdata = copy(A.data)
-		# tensoradd!(1, B.data, Bdims, 1, Rdata, Adims)
-
-		# This is slower
-		# Astrides = calc_strides(axes(A))[Adims]
-		# Bstrides = calc_strides(axes(B))[Bdims]
-		#
-		# axR = axes(A)[Adims]
-		# Rtype = promote_type(arraytype(A), arraytype(B))
-		# szR = map(a->last(a)-first(a)+1, axR)
-		# # szR = ntuple(i -> last(axR[i])-first(axR[i])+1, Val(ndims(A)))
-		# Rdata = Rtype(undef, szR)
-		#
-		# @inbounds for ci in CartesianIndices(axR)
-		# 	iA = calc_index(ci, Astrides)
-		# 	iB = calc_index(ci, Bstrides)
-		# 	Rdata[ci] = A[iA] + B[iB]
-		# end
-
-		# TODO: Define a simplified constructor for this?
-		#			Would using Val() in tupseq help?
-		# return Tensor{LS,RS}(Rdata, oneto(NL), tupseq(NL+1, NL+NR))
 	end
 end
 
+#    # This is slightly slower
+# 	function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
+#    NL = nlspaces(A)
+#    NR = nrspaces(A)
 
-function -(A::Tensor, B::Tensor)
-	spaces(A) == spaces(B) || error("To subtract MixedTensors, they must have the same spaces in the same order")
-	axes(A) == axes(B) || throw(DimensionMismatch("To subtract MixedTensors, they must have the same axes; got axes(A) = $(axes(A)), axes(B) = $(axes(B))"))
-	return Tensor(A.data - B.data, Val(lspaces(A)), Val(rspaces(A)))
+#    # Same code as in ==. Should we make a macro?
+#    Adims = (A.ldims..., A.rdims...)
+#    Bdims = (B.ldims..., B.rdims...)
+#    Astrides = calc_strides(axes(A))[Adims]
+#    Bstrides = calc_strides(axes(B))[Bdims]
+
+#    axR = axes(A)
+#    Rtype = promote_type(arraytype(A), arraytype(B))
+#    szR = map(a->last(a)-first(a)+1, axR)
+#    Rdata = Rtype(undef, szR)
+   
+#    @inbounds for ci in CartesianIndices(axR)
+#    	iA = calc_index(ci, Astrides)
+#    	iB = calc_index(ci, Bstrides)
+#    	Rdata[ci] = A[iA] + B[iB]
+#    end
+
+#    return Tensor{LS,RS}(Rdata, oneto(NL), tupseq(NL+1, NL+NR))
+# end
+
+
+
+-(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+
+function -(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
+	if A.ldims == B.ldims && A.rdims == B.rdims
+		# Same spaces in the same order
+		return Tensor(A.data + B.data, A)
+	else
+		# Same spaces in different order
+		# Same code as in ==. Should we make a macro?
+		Adims = (A.ldims..., A.rdims...)
+		Bdims = (B.ldims..., B.rdims...)
+
+		BinA = Bdims[invperm(Adims)]
+
+		Rdata = A.data - permutedims(B.data, BinA)
+		return Tensor(Rdata, A)
+	end
 end
+
 
 # Matrix multiplication.  These methods are actually quite fast -- about as fast as the
 # core matrix multiplication. We appear to incur very little overhead.
