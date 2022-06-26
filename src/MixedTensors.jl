@@ -98,60 +98,6 @@ const SpacesInt = UInt128  		# An integer treated as a bit set for vector spaces
 const Iterable = Union{Tuple, AbstractArray, UnitRange, Base.Generator}
 const Axes{N} = NTuple{N, AbstractUnitRange{<:Integer}}
 
-function maskbits(::Val{I}, ::Val{mask}) where {I} where {mask}
-	#isa(mask, NTuple{Bool}) || error("mask must be a NTuple{Bool}")
-	I isa SpacesInt || error("I must be a SpacesInt")
-	length(mask) == count_ones(I) || error("must have length(mask) == count_ones(I)")
-
-	maskbits_(Val(I), Val(mask))
-end
-
-
-function maskbits_(::Val{I}, ::Val{mask}) where {I} where {mask}
-	# print("  I = ", I, "  mask = ", mask)
-	N = length(mask)
-	if N == 0 
-		# println("")
-		return SpacesInt(0)
-	else
-		i = trailing_zeros(I) + 1
-		I_ = (I >> i) << i 
-		J = mask[1] ? SpacesInt(1) << (i-1) : SpacesInt(0)
-		# println("  i = ", i, "  bitmask = ", J)
-		return maskbits_(Val(I_), Val(tail(mask))) | J
-	end
-end
-
-# function maskbits_(::Val{I}, ::Val{mask}, J::SpacesInt) where {I,mask}
-# 	print("  I = ", I, "  mask = ", mask)
-# if length(mask) == 0
-# 		return SpacesInt(0)
-# 	elseif mask[1]
-# 		i = trailing_zeros(I)
-# 		J = J << i
-# 		println("  i = ", i, "  bitmask = ", J)
-
-# 		return maskbits_(Val(I>>i), Val(tail(mask)), J) | J
-# 	else
-# 		return maskbits_(Val(I>>i), Val(tail(mask)), J)
-# 	end
-# end 
-
-# function maskbits(::Val{I}, ::Val{mask}) where {I} where {mask}
-# 	#isa(mask, NTuple{Bool}) || error("mask must be a NTuple{Bool}")
-# 	N = length(mask)
-# 	I isa SpacesInt || error("I must be a SpacesInt")
-# 	#print("N = ", N, "  I = ", I, "  mask = ", mask)
-
-# 	if N == 0 
-# 		return I
-# 	else
-# 		i = trailing_zeros(I) + 1
-# 		I_ = (I >> i) << i 
-# 		#println("  i = ", i, "  bitmask = ", SpacesInt(mask[1]) << (i-1))
-# 		return  (SpacesInt(mask[1]) << (i-1)) | maskbits(Val(I_), Val(tail(mask)))
-# 	end
-# end
 
 
 # Compute the dimensions of selected spaces after the others are contracted out
@@ -973,17 +919,6 @@ end
 
 
 
-# function mult(A::Tensor{LSA,CS}, B::Tensor{CS,RSB}) where {LSA,RSB,CS}
-# 	NLA = nlspaces(A)
-# 	NRA = nrspaces(A)
-# 	NLB = nlspaces(B)
-# 	NRB = nrspaces(B)
-# 	ldims_ = A.ldims
-# 	rdims_ = B.rdims .+ (NLB - NLA)
-# 	R = reshape(Matrix(A) * Matrix(B), (lsize(A)..., rsize(B)...))
-# 	Tensor{LSA,RSB}(R, ldims_, rdims_)
-# end
-
 
 
 function *(A::Tensor{LSA,RSA}, B::Tensor{LSB,RSB}) where {LSA,RSA} where {LSB,RSB}
@@ -1050,76 +985,6 @@ function *(A::Tensor{LSA,RSA}, B::Tensor{LSB,RSB}) where {LSA,RSA} where {LSB,RS
 	#return nothing
 end
 
-
-# Given lspaces(A), rspaces(A), lspaces(B), rspaces(B), determine the indices for contraction
-
-@generated function get_mult_dims(::Val{lsa}, ::Val{rsa}, ::Val{lsb}, ::Val{rsb}) where {lsa,rsa,lsb,rsb}
-	# Example:
-	#    C[o1,o2,o3,o4; o1_,o2_,o3_] = A[o1, o2, o3; o1_, c1, c2] * B[c1, o4, c2; o2_, o3_]
-	# itsa, iosa = indices of contracted, open) right spaces of A = (2,3), (1,)
-	# itsb, iosb = indicices of contracted, open left spaces of B = (1,3), (2,)
-	
-	# odimsA = 1:nA, nA+iosa
-	# tdimsA = nA + itsa
-	# tdimsB = itsb
-	# odimsB = iosb, nB+(1:nB)
-
-	# find the dimensions of A,B to be contracted
-	# TODO: Would masking help?
-	nlA = length(lsa)
-	nrA = length(rsa)
-	nlB = length(lsb)
-	nrB = length(rsb)
-	ita_ = MVector{nrA,Int}(undef)			# vector of right dims of A to be traced
-	itb_ = MVector{nlB,Int}(undef)			# vector of left dims of B to be traces
-	oa_mask = @MVector ones(Bool, nrA)		# mask for open right dims of A
-	ob_mask = @MVector ones(Bool, nlB)		# maks for open left dims of B
-
-	nt = 0
-	for i = 1:nrA
-		for j = 1:nlB
-	 		if rsa[i] == lsb[j]
-				nt += 1
-	 			ita_[nt] = i
-	 			itb_[nt] = j
-				oa_mask[i] = false
-				ob_mask[j] = false
-	 		end
-	 	end
-	end
-
-	# indices into RSA and LSB of traced dimensions 
-	ita = Tuple(ita_)[oneto(nt)]
-	itb = Tuple(itb_)[oneto(nt)]
-	# dimensions to be traced
-	tdimsA = nlA .+ ita
-	tdimsB = itb
-
-	# indices into RSA and LSB of open dimensions
-	iora = oneto(nrA)[oa_mask]
-	iolb = oneto(nlB)[ob_mask]
-	
-	norA = nrA - nt		# number of open spaces of A
-	nolB = nlB - nt		# number of open spaces of B
-
-	odimsA = tcat(oneto(nlA), nlA .+ iora)
-	odimsB = tcat(iolb, tupseq(nlB+1, nlB+nrB))
-
-
-	# dimensions of output R
-	LSR = tcat(lsa, lsb[iolb])
-	RSR = tcat(rsa[iora], rsb)
-
-	nlR = nlA + nolB
-	nrR = norA + nrB
-
-	nodA = length(odimsA)
-	# indices into tcat(odimsA, odimsB)
-	ldimsR = tcat(oneto(nlA), tupseq(nodA + 1, nodA + nolB))
-	rdimsR = tcat(tupseq(nlA + 1, nlA + norA), tupseq(nodA + nolB + 1, nodA + nolB + nrB)) 
-	#dimsR = tcat(itsa, iosa, nodA .+ oneto(nosB), (nodA + nosB) .+ itsb, tupseq(nA+1, nA+nosA), (nodA + nosB) .+ iosb)
-	return :( ($tdimsA, $tdimsB, $odimsA, $odimsB, $ldimsR, $rdimsR, $LSR, $RSR) )
-end
 
 
 # Exponentiation
