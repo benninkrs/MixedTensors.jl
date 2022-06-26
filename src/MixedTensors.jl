@@ -15,29 +15,59 @@ Functions that take spaces as inputs:
 
 
 #=
-** Currently working on getindex, working my way down the file ** 
-TODO: getindex is still kinda slow (specifically the part M.data[idx...])
-TODO: lperm/rperm instead of ldims/rdims?
-TODO: reinstitute bypassing checking on the constructor
-TODO: Use dispatch to separate out A*B with same spaces
-TODO: Extend addition, subtraction to allow spaces to be in different order
-TODO: Extend * to form lazy outer products
-TODO: Support +,- for dissimilar spaces?  Perhaps lazy structures?
-TODO: Figure out why broadcasting is slow (slower than map/ntuple, at least)
-TODO: Use Strided.jl?
-TODO: Support in-place operations?
-TODO: Check validity of dims in lsize, rsize, laxes, raxes
-TODO: generalize + to >2 arguments
-TODO: Better support of different underlying array types?
+STATUS:
+constructors 				WORKING, PERFORMANT
+	> enable validation of ldims, rdims
+	> implement means to bypass checking on the constructor
+
+getindex						WORKING
+	• still kind of slow (slurping >4 indices is slow)
+
+setindex!		??
+
+tr								WORKING, PERFORMANT
+
+adjoint, transpose		WORKING, PERFORMANT
+
++,-							WORKING, PERFORMANT
+	> generalize to multiple operands?
+
+*,/							WORKING (Tensor * Tensor), IN PROGRESS (Tensor * Array)
+
+^								WORKING, PERFORMANT
+
+matrix ops					WORKING, PERFORMANT
+(inv, exp, log, sin, cos, tan, sinh, cosh, tanh)
+
+eigvals, svdvals			WORKING, PERFORMANT
+
+eigvectors/svd				NOT IMPLEMENTED
+
+broadcasting				NOT IMPLEMENTED
+
+
+FEATURES TBD:
+>	Would it make sense to define behavior of trace on non-square matrices>
+>	Support in-place operations?
+>	generalize + to >2 arguments
+>	Use TensorIteration instead of @diagonal_op ?
+
+Long term:
+>	Implement (lazy) product tensors
+>	Use Strided.jl?
+>	Better support of different underlying array types?
 			In places (e.g. *) it is assumed that the underlying array type has
 			the element type as the first parameter and has a constructor of the
 			form ArrayType{ElementType}(undef, size).
+>	lperm/rperm instead of ldims/rdims?
+
 =#
 
 module MixedTensors
 
 export Tensor, lsize, rsize, spaces, lspaces, rspaces, nlspaces, nrspaces
-export TestStruct, test_slurp, test_tuple
+export marginal
+export tr, eigvals, svdvals, opnorm
 
 using MiscUtils
 using SuperTuples
@@ -49,7 +79,7 @@ using Base: tail
 
 import Base: display, show
 import Base: ndims, length, size, axes, similar
-import Base: reshape, permutedims, adjoint, transpose, Matrix, ==
+import Base: reshape, permutedims, adjoint, transpose, Matrix, == #, isapprox
 import Base: getindex, setindex!
 import Base: (+), (-), (*), (/), (^)
 import Base: inv, exp, log, sin, cos, tan, sinh, cosh, tanh
@@ -215,9 +245,7 @@ struct Tensor{LS, RS, T, N, A<:DenseArray{T,N}, NL, NR} <: DenseArray{T,N}
 
 end
 
-struct TestStruct{A<:DenseArray}
-	data::A
-end
+
 
 # Convenience constructors
 
@@ -401,6 +429,39 @@ end
 ==(X::Tensor, Y::Tensor) = false
 
 
+# Base.isapprox works when X-Y has finite norm
+# function isapprox(X::Tensor{LS,RS}, Y::Tensor{LS,RS}; kwargs...) where {LS, RS}
+# 	# Check whether both arrays have the same permutation
+# 	if X.ldims == Y.ldims && X.rdims == Y.rdims
+# 		return isapprox(X.data, Y.data; kwargs...)
+# 	end
+
+# 	# check whether X,Y have the same elements when permuted
+
+# 	# I tried combining the permutations so that only a single linear index was calculated,
+# 	# but surprisingly that ended up being slower
+# 	Xdims = (X.ldims..., X.rdims...)
+# 	Ydims = (Y.ldims..., Y.rdims...)
+# 	ax = axes(X)[Xdims]
+
+# 	# It is probably possible to do this even faster using a macro
+# 	Xstrides = calc_strides(axes(X))[Xdims]
+# 	Ystrides = calc_strides(axes(Y))[Ydims]
+
+# 	for ci in CartesianIndices(ax)
+# 		iX = calc_index(ci, Xstrides)	 # computing the index each time probably costs more than updating the index based on the strides
+# 		iY = calc_index(ci, Ystrides)
+# 		if ~isapprox(X[iX], Y[iY]; kwargs...)
+# 			return false
+# 		end
+# 	end
+# 	return true
+
+# end
+# # Fallback when X,Y have different spaces
+# isapprox(X::Tensor, Y::Tensor; kwargs...) = false
+
+
 # Internal functions to make ensure a Tensor is "square".
 # A Tensor M is *square* if it has the same left and right spaces (in any order)
 # and the corresponding left and right axes are the same.
@@ -505,27 +566,26 @@ end
 
 #Swap left and right dimensions of a Tensor
 """
+Tensor transpose and partial transpose.
+
 	transpose(T::Tensor)
 
-Transpose (swap the left and right spaces) of a tensor. 
+transposes (exchanges the left and right spaces) of `T`. 
 
 	transpose(T::Tensor, space)
 	transpose(T::Tensor, spaces...)
 
-Transpose selected spaces (partial transpose).  In general the resulting spaces
-will be put in sequential order. But if T does not involve the specified spaces,
- `transpose` does nothing.
+Transpose selected spaces. If `T` does not involve the specified spaces
+the operation simply returns `T`.
+
+Note: the order of the spaces on output is not defined and should not be relied upon.
 """
 function transpose(M::Tensor{LS,RS}) where {LS,RS}
 	NL = nlspaces(M)
 	NR = nrspaces(M)
-	#perm = ntuple(i -> i <= NR ? NL+i : i-NL, Val(NL+NR))
 	perm = (tupseq(NL+1, NL+NR)..., oneto(Val{NL})...)
 	ldims_ = M.rdims .- NL
 	rdims_ = M.ldims .+ NR
-	# println(perm)
-	# println(ldims_)
-	# println(rdims_)
 	return Tensor{RS,LS}(permutedims(M.data, perm), ldims_, rdims_)
 end
 
@@ -556,10 +616,6 @@ function transpose(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS, RS, tspaces}
 		rperm = setindex(M.rdims, tldims, it_rspaces)
 		arr = permutedims(M.data, (lperm..., rperm...))
 		return Tensor{LS,RS}(arr, oneto(NL), tupseq(NL+1, NL+NR))
-		# lperm = setindex(oneto(NL), trdims, tldims)
-		# rperm = setindex(tupseq(NL+1,NL+NR), tldims, trdims .- NL)
-		# arr = permutedims(M.data, (lperm..., rperm...))
-		# return Tensor{LS,RS}(arr, M.ldims, M.rdims)
 	else
 		it_lspaces = findnzbits(TS, LS)		# indices of left spaces to be transposed
 		it_rspaces = findnzbits(TS, RS)		# indices of right spaces to be transposed
@@ -626,7 +682,13 @@ tr(M::Tensor, spaces::Dims) = tr(M, Val(spaces))
 
 function tr(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS,RS,tspaces}
 	# Int representation of traced spaces
-	TS = binteger(SpacesInt, Val(tspaces))
+	if tspaces isa Dims
+		TS = binteger(SpacesInt, Val(tspaces))
+	elseif tspaces isa SpacesInt
+		TS = tspaces
+	else
+		error("tspaces must be a SpacesInt or Dims")
+	end
 
 	# Int representation of kept spaces
 	KLS = ~TS & LS
@@ -656,6 +718,25 @@ function tr(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS,RS,tspaces}
 	trace!(one(T), M.data, :N, zero(T), R, lkdims, rkdims, ltdims, rtdims)
 	return Tensor{KLS, KRS}(R, oneto(NL), tupseq(NL+1, NL+NR))
 end
+
+"""
+	marginal(T::Tensor, spaces)
+
+Trace out all but the specified spaces.
+"""
+marginal(M::Tensor, space::Integer) = marginal(M, (space,))
+marginal(M::Tensor, spaces::Dims) = marginal(M, Val(spaces))
+
+function marginal(M::Tensor{LS,RS}, ::Val{kspaces}) where {LS,RS,kspaces}
+	KS = binteger(SpacesInt, Val(kspaces))
+	TSL = ~KS & LS
+	TSR = ~KS & RS
+	TSL == TSR || error("trace would act upon unequal left and right spaces")
+	return tr(M, Val(TSL))
+end
+
+
+
 
 
 #
@@ -694,21 +775,16 @@ end
 #
 # Arithmetic operations
 #
+
+
+# Addition and subtraction
+
 -(M::Tensor) = Tensor(-M.data, M)
 
-# Fallback methods (when x is not an abstract array or number)
-*(M::Tensor, x) = Tensor(M.data * x, M)
-*(x, M::Tensor) = Tensor(x * M.data, M)
-/(M::Tensor, x) = Tensor(M.data / x, M)
-
-*(M::Tensor, x::Number) = Tensor(M.data * x, M)
-*(x::Number, M::Tensor) = Tensor(x * M.data, M)
-/(M::Tensor, x::Number) = Tensor(M.data / x, M)
-
-# TODO:  Handle M .+ x and M .- x so that it returns a Tensor
-
-# fallbaclk
+# fallback (for unequal spaces)
 +(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+-(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+
 
 function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
 	if A.ldims == B.ldims && A.rdims == B.rdims
@@ -723,6 +799,24 @@ function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
 		BinA = Bdims[invperm(Adims)]
 
 		Rdata = A.data + permutedims(B.data, BinA)
+		return Tensor(Rdata, A)
+	end
+end
+
+
+function -(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
+	if A.ldims == B.ldims && A.rdims == B.rdims
+		# Same spaces in the same order
+		return Tensor(A.data - B.data, A)
+	else
+		# Same spaces in different order
+		# Same code as in ==. Should we make a macro?
+		Adims = (A.ldims..., A.rdims...)
+		Bdims = (B.ldims..., B.rdims...)
+
+		BinA = Bdims[invperm(Adims)]
+
+		Rdata = A.data - permutedims(B.data, BinA)
 		return Tensor(Rdata, A)
 	end
 end
@@ -754,42 +848,41 @@ end
 
 
 
--(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+#  Multiplication
 
-function -(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
-	if A.ldims == B.ldims && A.rdims == B.rdims
-		# Same spaces in the same order
-		return Tensor(A.data + B.data, A)
-	else
-		# Same spaces in different order
-		# Same code as in ==. Should we make a macro?
-		Adims = (A.ldims..., A.rdims...)
-		Bdims = (B.ldims..., B.rdims...)
+*(M::Tensor, x::Number) = Tensor(M.data * x, M)
+*(x::Number, M::Tensor) = Tensor(x * M.data, M)
+/(M::Tensor, x::Number) = Tensor(M.data / x, M)
 
-		BinA = Bdims[invperm(Adims)]
-
-		Rdata = A.data - permutedims(B.data, BinA)
-		return Tensor(Rdata, A)
-	end
-end
+# Fallbacks  -- should we have these?
+# *(M::Tensor, x) = Tensor(M.data * x, M)
+# *(x, M::Tensor) = Tensor(x * M.data, M)
+# /(M::Tensor, x) = Tensor(M.data / x, M)
 
 
 # Matrix multiplication.  These methods are actually quite fast -- about as fast as the
 # core matrix multiplication. We appear to incur very little overhead.
+#
+# !!!
+# Is this really desirable behavior?  Perhaps it would make more sense to have
+# the right dims of M contract again all the dims of A.
+
 """
-`M*X` where `M` is a Tensor and `X` is an `AbstractArray` contracts the right
-dimensions of `M` with dimensions `spaces(M)` of `X`.  The result is an array of type
-similar to `X`, whose size along the contracted dimensions is `lsize(M)` and whose size in
+`T*X` where `T` is a Tensor and `X` is an `AbstractArray` contracts the right
+dimensions of `T` with dimensions `rspaces(T)` of `X`.  The result is an array of type
+similar to `X`, whose size along the contracted dimensions is `lsize(T)` and whose size in
 the uncontracted dimensions is that of `X`.
 
 `X*M` is similar, except the left dimensions of `M` are contracted against `X`, and the
 size of the result depends on the `rsize(M)`.
 """
-*(M::Tensor, A::DenseArray{TA}) where {TA} = _mult_MA(M, A)
 *(M::Tensor, A::DenseArray{TA,1}) where {TA} = _mult_MA(M, A)
 *(M::Tensor, A::DenseArray{TA,2}) where {TA} = _mult_MA(M, A)
+*(M::Tensor, A::DenseArray{TA}) where {TA} = _mult_MA(M, A)
 
 function _mult_MA(M::Tensor, A::DenseArray)
+	error("The desired behavior of Tensor * Array has not been decided.")
+
 	nl = nlspaces(M)
 	nr = nrspaces(M)
 	S = rspaces(M)
@@ -810,12 +903,15 @@ function _mult_MA(M::Tensor, A::DenseArray)
 end
 #*(M::Tensor, A::DenseArray{TA,1}) where {TA} =
 
-*(A::DenseArray{TA}, M::Tensor) where {TA} = _mult_AM(A, M)
+
 *(A::DenseArray{TA,1}, M::Tensor) where {TA} = _mult_AM(A, M)
 *(A::DenseArray{TA,2}, M::Tensor) where {TA} = _mult_AM(A, M)
+*(A::DenseArray{TA}, M::Tensor) where {TA} = _mult_AM(A, M)
 
 # This is almost identical to the M*A version.
 function _mult_AM(A::DenseArray, M::Tensor)
+	error("The desired behavior of Array * Tensor has not been decided.")
+
 	n = nspaces(M)
 	S = spaces(M)
 	laxes(M) == axes(A, S) || throw(DimensionMismatch("axes(A, spaces(B)) must equal laxes(B)"))
@@ -837,67 +933,121 @@ end
 
 
 """
-`A*B` where `A` and `B` are MixedTensors.
+Tensor-Tensor multiplication.
+
+	C = A*B
+
+contracts the right spaces of Tensor `A` with matching left spaces of Tensor `B`.
+The left spaces of `C` are the left spaces of `A` and the uncontracted left spaces of `B`,
+provided these are distinct. (An error is thrown if they are not.)  Similarly, the right
+spaces of `C` are the right spaces of `B` and the uncontracted right spaces of `B`, provided
+these are distinct.  The order of the output spaces is undefined and should not be relied upon.
 """
-function *(A::Tensor{LSA,RSA}, B::Tensor{LSB,RSB}) where {LSA,RSA} where {LSB,RSB}
-	# Check for compatibility of spaces
-	SC = RSA & LSB			# spaces to be contracted
-	RSA_B = RSA & (~SC)		# right spaces of A, not contracted
-	LSB_A = LSB & (~SC)		# left spaces of B, not contracted
+function *(A::Tensor{LSA,CS}, B::Tensor{CS,RSB}) where {LSA,RSB,CS}
+	# All the right spaces of A contract with all the left spaces of B.
+	# All we need to do is put them in the correct order
+	axes(A, A.rdims) == axes(B, A.ldims) || throw(DimensionMismatch("The right axes of A must be the same as the correponding left axes of B"))
 
-	LSA & LSB_A == SpacesInt(0) || error("A and B have uncontracted left spaces in common")
-	RSB & RSA_B == SpacesInt(0) || error("A and B have uncontracted right spaces in common")
+	szR = (lsize(A)..., rsize(B)...)
 
-	LSR = LSA | LSB_A
-	RSR = RSB | RSA_B
+	NLA = nlspaces(A)
+	NRA = nrspaces(A)
+	NLB = nlspaces(B)
+	NRB = nrspaces(B)
+	ldims_ = A.ldims
+	rdims_ = B.rdims .+ (NLB - NLA)
 
-	error("Function in development")
-
-	#Atype = arraytype(A).name.wrapper
-	#Btype = arraytype(B).name.wrapper
-	#Atype == Btype || error("To multiply MixedTensors, the underlying array types must be the same.  Had types $Atype and $Btype")
-	lszA = lsize(A)
-	rszA = rsize(A)
-	lszB = lsize(B)
-	rszB = rsize(B)
-
-	#nA = nspaces(A)
-	#nB = nspaces(B)
-	rSA = rspaces(A)
-	lSB = lspaces(B)
-
-	if rSA == lSB
-		# Simple case:  rspaces(A) = lspaces(B)
-		raxes(A) == laxes(B) || throw(DimensionMismatch("raxes(A) = $(raxes(A)) must equal laxes(B) = $(laxes(B))"))
-		R = reshape(Matrix(A) * Matrix(B), tcat(lsize(A), rsize(B)))
-		return Tensor{LSA,RSB}(R, oneto(nlspaces(A)), tupseq(nlspaces(A)+1, nlspaces(A)+nrspaces(B)))
+	if rspaces(A) == lspaces(B)
+		# the spaces are the same and in the same order.
+		# Multiply as matrices (faster than tensor contraction)
+		R = reshape(Matrix(A) * Matrix(B), (lsize(A)..., rsize(B)...))
 	else
-		# General case
-		(tdimsA, tdimsB, odimsA, odimsB, ldimsR, rdimsR, LSR, RSR) = get_mult_dims(Val(lspaces(A)), Val(rspaces(A)), Val(lspaces(B)), Val(rspaces(B)))
-		# println("tdims A,B = $tdimsA <--> $tdimsB")
-		# println("odimsA = $odimsA")
-		# println("odimsB = $odimsB")
-		# println("dimsR = $dimsR")
-		# println("spacesR = $SR")
-
-		axes(A, tdimsA) == axes(B, tdimsB) || throw(DimensionMismatch("raxes(A) must equal laxes(B) on spaces common to A,B"))
-
-		szAB = tcat(size(A, odimsA), size(B, odimsB))
-		szR = szAB[tcat(ldimsR, rdimsR)]
-
+		# the spaces are in different orders.  Use tensor contraction
 		TR = promote_type(eltype(A), eltype(B))
 		R = Array{TR}(undef, szR)
-		# println("tdimsA = ", tdimsA)
-		# println("odimsA = ", odimsA)
-		# println("tdimsB = ", tdimsB)
-		# println("odimsB = ", odimsB)
-		# println("ldimsR = ", ldimsR)
-		# println("rdimsR = ", rdimsR)
-		# println("LSR, RSR = ", LSR, RSR)
-		contract!(one(eltype(A)), A.data, :N, B.data, :N, zero(TR), R, odimsA, tdimsA, odimsB, tdimsB, ldimsR, rdimsR, nothing)
-		return Tensor(R, Val(LSR), Val(RSR))
-		#return nothing
+		contract!(one(TR), A.data, :N, B.data, :N, zero(TR), R, 
+			oneto(NLA), A.rdims, tupseq(NLB+1, NLB+NRB), B.ldims, oneto(NLA), tupseq(NLA+1, NLA+NRB), nothing)
 	end
+	Tensor{LSA,RSB}(R, oneto(NLA), tupseq(NLA+1, NLA+NRB))
+end
+
+
+
+# function mult(A::Tensor{LSA,CS}, B::Tensor{CS,RSB}) where {LSA,RSB,CS}
+# 	NLA = nlspaces(A)
+# 	NRA = nrspaces(A)
+# 	NLB = nlspaces(B)
+# 	NRB = nrspaces(B)
+# 	ldims_ = A.ldims
+# 	rdims_ = B.rdims .+ (NLB - NLA)
+# 	R = reshape(Matrix(A) * Matrix(B), (lsize(A)..., rsize(B)...))
+# 	Tensor{LSA,RSB}(R, ldims_, rdims_)
+# end
+
+
+
+function *(A::Tensor{LSA,RSA}, B::Tensor{LSB,RSB}) where {LSA,RSA} where {LSB,RSB}
+	# Check for compatibility of spaces
+	CS = RSA & LSB			# spaces to be contracted
+	URSA = RSA & (~CS)		# right spaces of A, not contracted
+	ULSB = LSB & (~CS)		# left spaces of B, not contracted
+
+	LSA & ULSB == SpacesInt(0) || error("A and B have uncontracted left spaces in common")
+	RSB & URSA == SpacesInt(0) || error("A and B have uncontracted right spaces in common")
+
+	# left and right spaces of the result
+	LSR = LSA | ULSB
+	RSR = RSB | URSA
+
+	# determine which dimensions are contracted and which are not, and their order
+	# (needed for TensorOperations.contract!)
+	tdimsA = A.rdims[findnzbits(CS, RSA)]
+	tdimsB = B.ldims[findnzbits(CS, LSB)]
+	axes(A, tdimsA) == axes(B, tdimsB) || throw(DimensionMismatch("raxes(A) must equal laxes(B) on spaces common to A,B"))
+
+	urdimsA = A.rdims[findnzbits(URSA, RSA)]		# uncontracted right dims of A
+	uldimsB = B.ldims[findnzbits(ULSB, LSB)]		# uncontracted left dims of B
+	odimsA = (A.ldims..., urdimsA...)				# all "open" (uncontracted) dims of A
+	odimsB = (uldimsB..., B.rdims...)					# all "open" (uncontracted) dims of B
+	
+	# order of dimensions of R:
+	#   (left dims of A, uncontracted left dims of B, uncrontracted right dims of A, right dims of B)
+	
+	NLA = length(A.ldims)
+	NOA = NLA + length(urdimsA)
+	NOB = length(uldimsB) + length(B.rdims)
+
+	lorder = sortperm((findnzbits(LSA)..., findnzbits(ULSB)...))
+	rorder = sortperm((findnzbits(URSA)..., findnzbits(RSB)...))
+
+	# The dims of R will be in the order of the spaces
+	ldimsRo = (oneto(NLA)..., tupseq(NOA+1, NOA + length(uldimsB))...)[lorder]
+	rdimsRo = (tupseq(NLA + 1, NLA + length(urdimsA))..., tupseq(NOA + length(uldimsB) + 1, NOA + NOB)...)[rorder]
+
+	# ldimsR = sortperm(lspacesR)
+	# rdimsR = sortperm(rspacssR)
+	# println("LSR, RSR = ", findnzbits(LSR), findnzbits(RSR))
+	# println("tdimsA = ", tdimsA)
+	# println("odimsA = ", odimsA)
+	# println("tdimsB = ", tdimsB)
+	# println("odimsB = ", odimsB)
+	# println("ldimsR = ", ldimsR)
+	# println("rdimsR = ", rdimsR)
+	# println("rdimsR = ", rdimsR, " = ", tupseq(NLA + 1, NLA + length(urdimsA)), tupseq(NOA + length(uldimsB) + 1, NOA + NOB))
+
+	# allocate the output array
+	szR = (size(A, A.ldims)..., size(B, uldimsB)..., size(A, urdimsA)..., size(B, B.rdims)...)
+	TR = promote_type(eltype(A), eltype(B))
+	R = Array{TR}(undef, szR)
+
+	# contract
+	contract!(one(TR), A.data, :N, B.data, :N, zero(TR), R,
+						odimsA, tdimsA, odimsB, tdimsB, ldimsRo, rdimsRo, nothing)
+
+	NLR = count_ones(LSR)		# should equal	NLA + length(uldimsB)
+	NRR = count_ones(RSR)		# should equal length(urdimsA) + length(B.rdims)
+	return Tensor{LSR,RSR}(R, oneto(NLR), tupseq(NLR+1, NLR+NRR))
+	#return nothing
 end
 
 
@@ -972,8 +1122,11 @@ end
 end
 
 
-^(M::Tensor, x::Number) = Tensor(reshape(Matrix(M)^x, size(M)), Val(spaces(M)); checkspaces = false)
-^(M::Tensor, x::Integer) = Tensor(reshape(Matrix(M)^x, size(M)), Val(spaces(M)); checkspaces = false)
+# Exponentiation
+
+^(M::Tensor, x::Number) = Tensor(reshape(Matrix(M)^x, size(M)), M)
+^(M::Tensor, x::Integer) = Tensor(reshape(Matrix(M)^x, size(M)), M)
+
 
 #
 # Analytic matrix functions
@@ -997,7 +1150,11 @@ eigvals(M::Tensor, args...) = begin ensure_square(M); eigvals(Matrix(M), args...
 svdvals(M::Tensor, args...) = svdvals(Matrix(M), args...)
 
 
+
+#
 # Broadcasting
+#
+
 struct MultiMatrixStyle{S,A,N} <: Broadcast.AbstractArrayStyle{N} end
 MultiMatrixStyle{S,A,N}(::Val{N}) where {S,A,N} = MultiMatrixStyle{S,A,N}()
 
@@ -1009,147 +1166,6 @@ BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, M
 
 # BroadcastStyle(::Type{BitString{L,N}}) where {L,N} = BitStringStyle{L,N}()
 # BroadcastStyle(::BitStringStyle, t::Broadcast.DefaultArrayStyle{N}) where {N} = Broadcast.DefaultArrayStyle{max(1,N)}()
-
-
-#
-# """
-# `*(A::Tensor, spaces...) * B::Tensor` contracts A with the specified subspaces of B,
-# where `ndims(A) <= ndims(B)`, `length(spaces) = ndims(A)`, and `spaces ⊆ 1:ndims(B)`.
-# This is equivalent to, but generally faster than, tensoring A with the identity operator, permuting, and multiplying with B.
-#
-# `A * (B, spaces)` contracts B along the specified subspaces of A.
-# """
-# function (*)(tup::Tuple{Tensor, Vararg{Int}}, B::Tensor)
-# 	A = tup[1];
-# 	dims = collect(tup[2:end])
-#
-# 	a_lsz = lsize(A)
-# 	a_rsz = rsize(A)
-# 	b_lsz = lsize(B)
-# 	b_rsz = rsize(B)
-#
-# 	length(dims) == ndims(A) ||
-# 		error("Incompatible arguments: length(spaces) == $(length(dims)), should equal ndims(A) = $(ndims(A))")
-#
-# 	a_rsz == b_lsz[dims] ||
-# 		error("Dimension mismatch: rsize(A) == $a_rsz, lsize(B)[dims] = $(b_lsz[dims])")
-#
-# 	# make a mask of which spaces of B are involved in the multiply
-# 	other_dims = compl_dims(dims, ndims(B));
-#
-# 	# reorder the dimensions of B for multiplication and convert to a matrix
-# 	order = [dims; other_dims; (ndims(B)+1:2*ndims(B))...]
-# 	b_lsz_mult = *(b_lsz[dims]...);
-# 	b_rsz_mult = *(b_lsz[other_dims]..., b_rsz...)
-# 	B_mat = reshape(permutedims(B.data, order), (b_lsz_mult, b_rsz_mult))
-#
-# 	# Compute the matrix product, reshape, and put the dimensions back in original order
-# 	C_mat = matrix(A) * B_mat
-# 	c_lsz = (a_lsz..., b_lsz[other_dims]...)
-# 	C_mat = ipermutedims(reshape(C_mat, (c_lsz..., b_rsz...)), order)
-# 	return Tensor(C_mat)
-# end
-#
-# function mult(tup::Tuple{Tensor, Vararg{Int}}, B::Tensor)
-# 	A = tup[1]
-# 	ndA = ndims(A)
-# 	ndB = ndims(B)
-# 	dims = collect(tup[2:end])
-# 	other_dims = compl_dims(dims, ndB)
-#
-# 	a_lsz = lsize(A)
-# 	a_rsz = rsize(A)
-# 	b_lsz = lsize(B)
-# 	b_rsz = rsize(B)
-#
-# 	order = [dims; other_dims; (ndims(B)+1:2*ndims(B))...]
-# 	#iorder = invperm(order)
-# 	c_sz = Array{Int}(2*ndB);
-# 	c_sz[order] = [a_lsz...; b_lsz[other_dims]...; b_rsz...]
-#
-# 	new_data = Array{promote_type(eltype(A),eltype(B))}(c_sz...)
-# 	oA = 1:ndA
-# 	cA = ndA+1:2*ndA
-# 	oB = [other_dims...; ndB+1:2*ndB]
-# 	cB = dims
-# 	iC = Array{Int}(2*ndB);
-# 	iC[order] = 1:2*ndB
-# 	contract!(1, A.data, Val(:N), B.data, Val(:N), 0, new_data, oA, cA, oB, cB, iC, Val(:BLAS))
-# 	return Tensor(new_data)
-# end
-#
-#
-# function (*)(A::Tensor, tup::Tuple{Tensor, TTuple{Int}})
-# 	B = tup[1];
-# 	dims = collect(tup)[2:end]
-# 	a_lsz = lsize(A)
-# 	a_rsz = rsize(A)
-# 	b_lsz = lsize(B)
-# 	b_rsz = rsize(B)
-#
-# 	length(dims) == ndims(B) ||
-# 		error("Incompatible arguments: length(spaces) == $(length(dims)), should equal ndims(B) = $(ndims(A))")
-#
-# 	b_lsz == a_rsz[dims] ||
-# 		error("Dimension mismatch: lsize(B) == $b_lsz, rsize(A)[dims] = $(b_lsz[dims])")
-#
-# 	# make a mask of which spaces of A are involved in the multiply
-# 	other_dims = compl_dims(dims, ndims(A))
-# 	nd = dims(A);
-#
-# 	# reorder the dimensions of A for multiplication and convert to a matrix
-# 	order = [(1:nd)...; nd+other_dims; nd+dims]
-# 	a_lsz_mult = *(a_lsz..., a_rsz[other_dims]...)
-# 	a_rsz_mult = *(a_rsz[dims]...)
-# 	A_mat = reshape(permutedims(A.data, order), (a_lsz_mult, a_rsz_mult))
-#
-# 	# Compute the matrix product, reshape, and put the dimensions back in original order
-# 	C_mat = A_mat * matrix(B)
-# 	c_rsz = (a_rsz[other_dims]..., b_rsz...);
-# 	C_mat = ipermutedims(reshape(C_mat, (a_lsz..., c_rsz...)), order);
-# 	return Tensor(C_mat)
-# end
-#
-#
-# trace(X::Tensor) = trace(matrix(X))
-# # Partial trace
-# trace(X::Tensor, dims...) = trace(X, collect(dims))
-# trace(X::Tensor, dims::Array{Int,1}) = trace_(X, dims, compl_dims(dims, ndims(X)))
-#
-# function trace_(X::Tensor, dims::Array{Int,1}, other_dims::Array{Int,1})
-# 	if isempty(dims)
-# 		return X
-# 	elseif isempty(other_dims)
-# 		return trace(matrix(X))
-# 	end
-#
-# 	nd = ndims(X);
-# 	lsz = lsize(X);
-# 	rsz = rsize(X);
-#
-# 	order = [other_dims; nd+other_dims; dims; nd+dims];
-# 	new_data = permutedims(X.data, order);
-# 	tsz = (lsz[dims]..., rsz[dims]...);
-# 	xsz = (lsize(X)[other_dims]..., rsize(X)[other_dims]...)
-# 	new_data = reshape(new_data, *(xsz...), *(tsz...));
-# 	# WRONG!  This needs to be done for each dimension
-# 	new_data = sum(new_data[:, 1:tsz[1]+1:tsz[1]*tsz[2]], 2);
-# 	new_data = reshape(new_data, xsz);
-# 	return Tensor(new_data);
-# end
-#
-#
-# # Given an array representing a subset of 1:n, returns an array of the complentary subset.
-# function compl_dims(dims::Array{Int}, n::Int)
-# 	is_active = falses(n)
-# 	is_active[dims] = true;
-# 	return find(!is_active);
-# end
-#
-#
-# # Reduce (trace over complementary dimensions)
-# reduce(X::Tensor, dims...) = reduce(X, collect(dims))
-# reduce(X::Tensor, dims::Array{Int,1}) = trace_(X, compl_dims(collect(dims), ndims(X)), dims)
 
 
 
