@@ -1,4 +1,4 @@
-using MixedTensors
+using AlgebraicTensors
 using BenchmarkTools
 using LinearAlgebra: I, tr
 using Test

@@ -1,7 +1,7 @@
 # AlgebraicTensors.jl
 An implementation of tensors as algebraic objects:  objects that can be scaled, added, and multiplied.  This facilitates computations involving vectors and linear operators in high-dimensonal product spaces, such as occur in quantum information theory.
 
-## Overview
+## Concept
 As implemented here, a tensor is a multidimensional array where each dimension is asociated with a particular vector space.  Each of these spaces is designated as either a "left" space or as a "right" space; left and right spaces with the same label are dual to each other. In multiplication expressions, a tensor's left spaces contract (form inner products) with dual factors on the left, whereas right spaces form inner products with dual factors on the right. Left and right spaces are analogous to the columns and rows of a matrix, respectively, and the tensors implemented here may be thought of as multidimensional generalizations of vectors and matrices.
 
 A tensor is represented by the provided `Tensor` type. A `Tensor` `T` with left spaces `(l1,...,lm)` and right spaces `(r1,...,rn)` represents a tensor
@@ -68,16 +68,32 @@ julia> tr(X, 3)				# (partial) trace
 julia> transpose(X, 5)		# (partial) transpose
 
 julia> eig(S)					# eigenvalues
-
 ```
 Some tensor operations are defined only for certain combinations of left and right spaces.  For example, addition and subtraction are defined only for tensors with the same spaces.  Likewise, analytic functions are defined only for "square" tensors: tensors whose left and right spaces are the same, and whose corresponding left and right array dimensions have the same axes.
 
 
-## Miscellaneous
+## Other Functions
 
 A `Tensor` can be converted to a `Matrix` by folding all the left spaces into the first dimension and all the right spaces into the second dimension:
 ```
 julia> Matrix(t)
-??
 ```
-This is sometimes useful for inspecting tensors that represent linear operators.
+This is sometimes helpful for inspecting tensors that represent linear operators.
+
+
+## Implementation
+
+The `Tensor` type is a wrapper for a multidimensional array, with type parameters specifying the associated left and right spaces.  This enables the generation of performant code since the dimensions to be contracted (and hence the requisite looping constructs) are often determinable at compile-time.  However, if most of the tensor operations involve tensors whose spaces are run-time values, this benefit may not be fully realized.  Also, if one's calculation consists of many different contractions involving many different sets of spaces, compile time may become non-negligible.
+
+Many of the tensor operations provided by AlgebraicTensors are implemented via the low-level functions provided by [TensorOperations.jl](https://github.com/Jutho/TensorOperations.jl), which are efficient and cache-aware.
+
+
+
+## Comparison with Other Tensor Packages
+
+AlgebraicTensors complements existing Julia tensor packages:
+ * Tensors implemented in [Tensors.jl](https://github.com/Ferrite-FEM/Tensors.jl) can have only 1, 2, or 4 dimensions and maximum length 3 in any dimension.  AlgebraicTensors supports tensors of (practically) arbitrary size and dimensionality.
+ * [Einsum.jl](https://github.com/ahwillia/Einsum.jl) and [TensorOperations.jl](https://github.com/Jutho/TensorOperations.jl) provide a index-based syntax similar to Einstein notation for implementing contraction and other operations on multidimensional arrays.  This requires the dimensions to be contracted (and those not) to be "hard coded" into the expression. AlgebraicTensors implements tensors as algebraic objects that can be multiplied and added using standard syntax, with the dimensions to be contracted (or not) determined programmatically from the spaces associated with each tensor. 
+ 
+ While [TensorOperations.jl](https://github.com/Jutho/TensorOperations.jl) does provide low-level functions for programmatic tensor contraction, these are not particularly convenient. AlgebraicTensors builds on these functions to implement standard algebraic expressions involving tensors.
+  
