@@ -1,7 +1,7 @@
 """
-	MixedTensors (module)
+	AlgebraicTensors (module)
 
-Implements arbitrary tensors acting on labelled vector spaces and/or their duals. 
+Implements arbitrary tensors as algebraic objects.
 """
 
 
@@ -63,7 +63,7 @@ Long term:
 
 =#
 
-module MixedTensors
+module AlgebraicTensors
 
 export Tensor, lsize, rsize, spaces, lspaces, rspaces, nlspaces, nrspaces
 export marginal
@@ -1027,7 +1027,7 @@ similar(bc::Broadcasted{MMS}, ::Type{T}) where {MMS<:MultiMatrixStyle{S,A,N}} wh
 
 BroadcastStyle(::Type{Tensor{S,T,N,A}}) where {S,T,N,A} = MultiMatrixStyle{S,A,N}()
 BroadcastStyle(::Type{Tensor{S,T1,N,A1}}, ::Type{Tensor{S,T2,N,A2}})  where {A1<:DenseArray{T1,N}} where {A2<:DenseArray{T2,N}} where {S,N} where {T1,T2} = MultiMatrixStyle{S, promote_type(A1,A2), N}()
-BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, MixedTensors must have the same dimensions and the same spaces in the same order")
+BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, Tensors must have the same dimensions and the same spaces in the same order")
 
 # BroadcastStyle(::Type{BitString{L,N}}) where {L,N} = BitStringStyle{L,N}()
 # BroadcastStyle(::BitStringStyle, t::Broadcast.DefaultArrayStyle{N}) where {N} = Broadcast.DefaultArrayStyle{max(1,N)}()
