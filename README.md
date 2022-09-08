@@ -1,10 +1,10 @@
 # AlgebraicTensors.jl
-An implementation of tensors as algebraic objects:  objects that can be scaled, added, and multiplied.  This facilitates computations involving vectors and linear operators in high-dimensonal product spaces, such as occur in quantum information theory.
+**AlgebraicTensors** implements of tensors as algebraic objects:  objects that can be scaled, added, and multiplied.  This facilitates computations involving vectors and linear operators in high-dimensonal product spaces, such as occur in quantum information theory.
 
 ## Concept
-As implemented here, a tensor is a multidimensional array where each dimension is asociated with a particular vector space.  Each of these spaces is designated as either a "left" space or as a "right" space; left and right spaces with the same label are dual to each other. In multiplication expressions, a tensor's left spaces contract (form inner products) with dual factors on the left, whereas right spaces form inner products with dual factors on the right. Left and right spaces are analogous to the columns and rows of a matrix, respectively, and the tensors implemented here may be thought of as multidimensional generalizations of vectors and matrices.
+Here, a tensor is a multidimensional array where each dimension is asociated with a particular vector space.  Each of these spaces is designated as either a "left" space or as a "right" space; left and right spaces with the same label are dual to each other. In multiplication expressions, a tensor's left spaces contract (form inner products) with dual factors on the left, whereas right spaces form inner products with dual factors on the right. Left and right spaces are analogous to the columns and rows of a matrix, respectively, and the tensors implemented here may be thought of as multidimensional generalizations of vectors and matrices.
 
-A tensor is represented by the provided `Tensor` type. A `Tensor` `T` with left spaces `(l1,...,lm)` and right spaces `(r1,...,rn)` represents a tensor
+The `Tensor` type is provided to represent such a tensor. A `Tensor` `T` with left spaces `(l1,...,lm)` and right spaces `(r1,...,rn)` represents a tensor
  $$
  T \in V_{l_1} \otimes \cdots \otimes V_{l_m} \otimes V^\dagger_{r_1} \otimes \cdots V^\dagger_{r_n}
  $$
@@ -85,7 +85,7 @@ This is sometimes helpful for inspecting tensors that represent linear operators
 
 The `Tensor` type is a wrapper for a multidimensional array, with type parameters specifying the associated left and right spaces.  This enables the generation of performant code since the dimensions to be contracted (and hence the requisite looping constructs) are often determinable at compile-time.  However, if most of the tensor operations involve tensors whose spaces are run-time values, this benefit may not be fully realized.  Also, if one's calculation consists of many different contractions involving many different sets of spaces, compile time may become non-negligible.
 
-Many of the tensor operations provided by AlgebraicTensors are implemented via the low-level functions provided by [TensorOperations.jl](https://github.com/Jutho/TensorOperations.jl), which are efficient and cache-aware.
+Many of the tensor operations provided by AlgebraicTensors are efficiently implemented via the low-level functions provided by [TensorOperations.jl](https://github.com/Jutho/TensorOperations.jl).
 
 
 

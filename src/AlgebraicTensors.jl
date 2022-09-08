@@ -1,7 +1,7 @@
 """
 	AlgebraicTensors (module)
 
-Implements arbitrary tensors as algebraic objects.
+Implements tensors of arbitrary dimensionality and size as algebraic objects.
 """
 
 
@@ -21,9 +21,9 @@ constructors 				WORKING, PERFORMANT
 	> implement means to bypass checking on the constructor
 
 getindex						WORKING
-	• still kind of slow (slurping >4 indices is slow)
+	• still kind of slow due to unavoidable type instability.
 
-setindex!		??
+setindex!					WORKINGm PERFORMANT
 
 tr								WORKING, PERFORMANT
 
@@ -41,7 +41,9 @@ matrix ops					WORKING, PERFORMANT
 
 eigvals, svdvals			WORKING, PERFORMANT
 
-eigvectors/svd				NOT IMPLEMENTED
+eigvecs						WORKING, PERFORMANT
+svd							WORKING, but results returned as NamedTuple instead of SVD
+								(SVD requires U and Vt to have the same type, which they cannot)
 
 broadcasting				NOT IMPLEMENTED
 
@@ -84,7 +86,7 @@ import Base: getindex, setindex!
 import Base: (+), (-), (*), (/), (^)
 import Base: inv, exp, log, sin, cos, tan, sinh, cosh, tanh
 
-import LinearAlgebra: tr, eigvals, svdvals, opnorm
+import LinearAlgebra: tr, eigvals, svdvals, opnorm, eigvecs, svd
 import Base: similar
 import SuperTuples.static_fn
 
@@ -97,12 +99,11 @@ import SuperTuples.static_fn
 const SpacesInt = UInt128  		# An integer treated as a bit set for vector spaces
 const Iterable = Union{Tuple, AbstractArray, UnitRange, Base.Generator}
 const Axes{N} = NTuple{N, AbstractUnitRange{<:Integer}}
-
-
+const SupportedArray{T,N} = DenseArray{T,N}		# can change this later.  Maybe to StridedArray?
 
 # Compute the dimensions of selected spaces after the others are contracted out
 function remain_dims(dims::Dims{N}, ::Val{S}, ::Val{K}) where {N, S, K}
-	# S and K should be SpaceInts
+	# S and K should be SpacesInts
 	count_ones(S) == N || error("count_ones(S) must equal length(dims)")
 	idims = findnzbits(K, S)
 	kdims = dims[idims]
@@ -163,7 +164,7 @@ are associated with a set of "left" vector spaces (l1,...,lm) and the last n dim
 are associated with a set of "right" vector spaces (r1,...,rn). Each space is
 designated by an integer ∈ 1,...,128. Left and right spaces with the same index are adjoint (dual).
 """
-struct Tensor{LS, RS, T, N, A<:DenseArray{T,N}, NL, NR} <: DenseArray{T,N}
+struct Tensor{LS, RS, T, N, A<:SupportedArray{T,N}, NL, NR} <: SupportedArray{T,N}
 	# LS and RS are wide unsigned integers whose bits indicate the left and right spaces
 	# ldims and rdimes map the left and right spaces to corresponding dimensions of A.
 	# (all the left dimensions precede all the right dimensions)
@@ -172,24 +173,46 @@ struct Tensor{LS, RS, T, N, A<:DenseArray{T,N}, NL, NR} <: DenseArray{T,N}
 	rdims::Dims{NR}		# dims of A corresponding to the ordered right spaces
 
 	# Primary inner constructor. Validates inputs
-	function Tensor{LS, RS}(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}) where {LS, RS, NL, NR} where {A<:DenseArray{T,N}} where {T,N}
-		count_ones(LS) == NL || error("length(ldims) must equal count_ones(LS)")
-		count_ones(RS) == NR || error("length(rdims) must equal count_ones(RS)")
-		# isperm((ldims...,rdims...)) || error("ldims and rdims must form a permutation of the array's dimensions")
-		NL + NR == N || error("ndims(A) must be equal the total number of spaces (left + right)")
+	function Tensor{LS, RS}(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}; validate = true) where {LS, RS, NL, NR} where {A<:SupportedArray{T,N}} where {T,N}
+		# LS isa SpacesInt && RS isa SpacesInt || error("Invalid type parameters LS,RS")
+		if validate
+			count_ones(LS) == NL || error("length(ldims) must equal count_ones(LS)")
+			count_ones(RS) == NR || error("length(rdims) must equal count_ones(RS)")
+			isperm((ldims...,rdims...)) || error("ldims and rdims must form a permutation of the array's dimensions")
+			NL + NR == N || error("ndims(A) == $N must be equal the total number of spaces (left + right) == $(NL+NR)")
+		end
 		return new{LS, RS, T, N, A, NL, NR}(data, ldims, rdims)
 	end
 
-	# Construct from non-DenseArrays
-	Tensor{LS,RS}(data::AbstractArray, ldims, rdims) where {LS,RS} = Tensor{LS,RS}(collect(data), ldims, rdims)
+	# Construct from Arrays whose type is not intrinsically supported
+	Tensor{LS,RS}(data::AbstractArray, ldims, rdims; validate = true) where {LS,RS} = Tensor{LS,RS}(collect(data), ldims, rdims; validate)
 
 	# Shortcut constructor: construct from array, using another Tensor's metadata.
 	# By ensuring the array has the right number of dimensions, no input checking is needed.
-	function Tensor(arr::A_, M::Tensor{LS,RS,T,N,A,NL,NR}) where {A_ <: DenseArray{T_,N}} where {T_} where {LS,RS,T,N,A,NL,NR}
+	function Tensor(arr::A_, M::Tensor{LS,RS,T,N,A,NL,NR}) where {A_ <: SupportedArray{T_,N}} where {T_} where {LS,RS,T,N,A,NL,NR}
 		return new{LS,RS,T_,N,A_,NL,NR}(arr, M.ldims, M.rdims)
 	end
 
 end
+
+
+# struct UntypedTensor{T, N, A<:SupportedArray{T,N}, NL, NR} <: SupportedArray{T,N}
+# 	# LS and RS are wide unsigned integers whose bits indicate the left and right spaces
+# 	# ldims and rdimes map the left and right spaces to corresponding dimensions of A.
+# 	# (all the left dimensions precede all the right dimensions)
+# 	data::A
+# 	ldims::Dims{NL}		# dims of A corresponding to the ordered left spaces
+# 	rdims::Dims{NR}		# dims of A corresponding to the ordered right spaces
+
+# 	# Primary inner constructor. Validates inputs
+# 	function UntypedTensor(data::A, ldims::NTuple{NL,Integer}, rdims::NTuple{NR,Integer}; validate = true) where {LS, RS, NL, NR} where {A<:SupportedArray{T,N}} where {T,N}
+# 		if validate
+# 			isperm((ldims...,rdims...)) || error("ldims and rdims must form a permutation of the array's dimensions")
+# 			NL + NR == N || error("ndims(A) must be equal the total number of spaces (left + right)")
+# 		end
+# 		return new{T, N, A, NL, NR}(data, ldims, rdims)
+# 	end
+# end
 
 
 
@@ -275,7 +298,7 @@ end
 # #Similar array with different type and/or size
 # const Shape = Tuple{Union{Integer, Base.OneTo},Vararg{Union{Integer, Base.OneTo}}}
 #
-# similar(::Type{M}) where {M<:Tensor{LS,RS,T,N,A}} where {LS,RS} where {A<:DenseArray{T,N}} where {T,N} = Tensor{LS,RS,T,N,A}(similar(A, shape))
+# similar(::Type{M}) where {M<:Tensor{LS,RS,T,N,A}} where {LS,RS} where {A<:SupportedArray{T,N}} where {T,N} = Tensor{LS,RS,T,N,A}(similar(A, shape))
 
 #-------------
 # Size and shape
@@ -315,15 +338,17 @@ raxes(M::Tensor) = ntuple(i -> axes(M.data, M.rdims[i]), Val(nrspaces(M)))
 arraytype(::Tensor{LS,RS,T,N,A} where {LS,RS,T,N}) where A = A
 
 
-size2string(d) = isempty(d) ? "0-dim" :
-                 length(d) == 1 ? "length-$(d[1])" :
-                 join(map(string,d), '×')
+# size2string(d) = isempty(d) ? "0-dim" :
+#                  length(d) == 1 ? "length-$(d[1])" :
+#                  join(map(string,d), '×')
 
 display(M::Tensor) = show(M)
 
 function show(io::IO, M::Tensor)
 	# print as usual
-	print(io, size2string(size(M.data)), " ")
+	ls = join(map(string, lsize(M)), '×')
+	rs = join(map(string, rsize(M)), '×')
+	print(io, '(', ls, ")×(", rs, ") ")
 	print(io, "Tensor{", lspaces(M), "←→", rspaces(M), ", ", arraytype(M), "}")
 
 	if !isempty(M.data)
@@ -463,12 +488,12 @@ Indexing a Tensor indexes the backing array.  If all the indices are scalars the
 is the specified array element.  Otherwise the result is a Tensor whose spaces are those
 associated with the dimensions that were indexed by non-scalars.
 """
-getindex(M::Tensor, i::Vararg{Union{Integer, CartesianIndex}}) = getindex(M.data, i...)
+@inline getindex(M::Tensor, i::Vararg{Union{Integer, CartesianIndex}}) = getindex(M.data, i...)
 
 # Index with ranges returns a Tensor.
 # Spaces indexed by scalars are removed from the Tensor
-getindex(M::Tensor, idx...) = getindex_(M, idx)
-function getindex_(M::Tensor{LS,RS}, idx) where {LS,RS}		# for some reason, slurping/Vararg is slow
+@inline getindex(M::Tensor, idx...) = getindex_(M, idx)
+@inline function getindex_(M::Tensor{LS,RS}, idx) where {LS,RS}	# for some reason, slurping/Vararg is slow
 	# I = to_indices(M.data, idx)
 	NL = nlspaces(M)
 	NR = nrspaces(M)
@@ -480,17 +505,61 @@ function getindex_(M::Tensor{LS,RS}, idx) where {LS,RS}		# for some reason, slur
 	ldkeep = tfindall(Val(ldmask))
 	rdkeep = tfindall(Val(rdmask))
 	NL_ = length(ldkeep)
-	# NR_ = length(rdkeep)
 
+	# LS_ and RS_ cannot be inferred, since they depend on ldims and rdims (runtime values).
+	# Consequently this function is type unstable.  However, indexing is generally type unstable.
+	# But it seems to slow down this function a lot.
 	(LS_, ldims_) = unindexed_dims(M.ldims, ldkeep, Val(LS))
 
-	rdims = M.rdims .- NL
-	(RS_, rdims_) = unindexed_dims(rdims, rdkeep, Val(RS))
+	(RS_, rdims_) = unindexed_dims(M.rdims .- NL, rdkeep, Val(RS))
 	rdims_ = rdims_ .+ NL_
-	# rdims_ = map(i -> i+ length(ldims_), rdims_)		#  a little faster
 
-	data_ = M.data[idx...]		# this is slow, much slower than when calling explicity
-	Tensor{LS_,RS_}(data_, ldims_, rdims_)
+	data_ = M.data[idx...]		# returning here is fast
+	# Tensor{SpacesInt(0), SpacesInt(0)}(data_, ldims_, rdims_; validate = false) # this is almost as fast
+	#UntypedTensor(data_, ldims_, rdims_; validate = false)	# this is also almost as fast
+	Tensor{LS_,RS_}(data_, ldims_, rdims_; validate = false)  # this is 4x slower for small tensors
+end
+
+
+# @inline getindex4(M::Tensor{LS,RS}, LS_, RS_, ldims_, rdims_, idx...) where {LS,RS} = Tensor{LS_,RS_}(M.data[idx...], ldims_, rdims_)
+# @inline getindex4(M::Tensor{LS,RS}, ::Val{LS_}, ::Val{RS_}, ldims_, rdims_, idx...) where {LS,RS} where {LS_,RS_} = Tensor{LS_,RS_}(M.data[idx...], ldims_, rdims_)
+# @inline getindex2(M::Tensor{LS,RS}, idx...) where {LS,RS}	= getindex2_(M, M.data[idx...], idx, Val(M.ldims), Val(M.rdims))
+# @inline function getindex2_(M::Tensor{LS,RS}, data_, idx, ::Val{LDIMS}, ::Val{RDIMS}) where {LS,RS} where {LDIMS,RDIMS} # for some reason, slurping/Vararg is slow
+# 	NL = nlspaces(M)
+# 	NR = nrspaces(M)
+
+# 	# Tuple of bools indicating which dimensions to keep
+# 	ldmask = ntuple(i -> !isa(idx[i], Integer), Val(NL)) 
+# 	rdmask = ntuple(i -> !isa(idx[i+NL], Integer), Val(NR))
+
+# 	ldkeep = tfindall(Val(ldmask))
+# 	rdkeep = tfindall(Val(rdmask))
+# 	NL_ = length(ldkeep)
+# 	# NR_ = length(rdkeep)
+
+# 	# (LS_, ldims_) = unindexed_dims(M.ldims, ldkeep, Val(LS))
+# 	(LS_, ldims_) = unindexed_dims(LDIMS, ldkeep, Val(LS))
+
+# 	# rdims = M.rdims .- NL
+# 	rdims =  RDIMS .- NL
+# 	(RS_, rdims_) = unindexed_dims(rdims, rdkeep, Val(RS))
+# 	rdims_ = rdims_ .+ NL_
+
+# 	Tensor{LS_,RS_}(data_, ldims_, rdims_)
+# end
+
+
+
+
+@inline function setindex!(M::Tensor, data, idx...)
+	M.data[idx...] = data
+	M
+end
+
+
+@inline function setindex!(M::Tensor, S::Tensor, idx...)
+	M.data[idx...] = S.data
+	M
 end
 
 #-----------------------
@@ -808,7 +877,9 @@ end
 
 # Matrix multiplication.  These methods are actually quite fast -- about as fast as the
 # core matrix multiplication. We appear to incur very little overhead.
-#
+
+
+
 # !!!
 # Is this really desirable behavior?  Perhaps it would make more sense to have
 # the right dims of M contract again all the dims of A.
@@ -819,16 +890,14 @@ dimensions of `T` with dimensions `rspaces(T)` of `X`.  The result is an array o
 similar to `X`, whose size along the contracted dimensions is `lsize(T)` and whose size in
 the uncontracted dimensions is that of `X`.
 
-`X*M` is similar, except the left dimensions of `M` are contracted against `X`, and the
+`X*T` is similar, except the left dimensions of `T` are contracted against `X`, and the
 size of the result depends on the `rsize(M)`.
 """
-*(M::Tensor, A::DenseArray{TA,1}) where {TA} = _mult_MA(M, A)
-*(M::Tensor, A::DenseArray{TA,2}) where {TA} = _mult_MA(M, A)
-*(M::Tensor, A::DenseArray{TA}) where {TA} = _mult_MA(M, A)
+*(M::Tensor, A::SupportedArray{TA,1}) where {TA} = _mult_MA(M, A)
+*(M::Tensor, A::SupportedArray{TA,2}) where {TA} = _mult_MA(M, A)
+*(M::Tensor, A::SupportedArray{TA}) where {TA} = _mult_MA(M, A)
 
-function _mult_MA(M::Tensor, A::DenseArray)
-	error("The desired behavior of Tensor * Array has not been decided.")
-
+function _mult_MA(M::Tensor, A::SupportedArray)
 	nl = nlspaces(M)
 	nr = nrspaces(M)
 	S = rspaces(M)
@@ -847,15 +916,15 @@ function _mult_MA(M::Tensor, A::DenseArray)
 	contract!(one(eltype(M)), M.data, :N, A, :N, zero(TR), R, oneto(nl), tupseq(nl+1,nl+nr), odimsA, S, invperm((S...,odimsA...)))
 	return R
 end
-#*(M::Tensor, A::DenseArray{TA,1}) where {TA} =
+#*(M::Tensor, A::SupportedArray{TA,1}) where {TA} =
 
 
-*(A::DenseArray{TA,1}, M::Tensor) where {TA} = _mult_AM(A, M)
-*(A::DenseArray{TA,2}, M::Tensor) where {TA} = _mult_AM(A, M)
-*(A::DenseArray{TA}, M::Tensor) where {TA} = _mult_AM(A, M)
+*(A::SupportedArray{TA,1}, M::Tensor) where {TA} = _mult_AM(A, M)
+*(A::SupportedArray{TA,2}, M::Tensor) where {TA} = _mult_AM(A, M)
+*(A::SupportedArray{TA}, M::Tensor) where {TA} = _mult_AM(A, M)
 
 # This is almost identical to the M*A version.
-function _mult_AM(A::DenseArray, M::Tensor)
+function _mult_AM(A::SupportedArray, M::Tensor)
 	error("The desired behavior of Array * Tensor has not been decided.")
 
 	n = nspaces(M)
@@ -892,7 +961,7 @@ these are distinct.  The order of the output spaces is undefined and should not 
 function *(A::Tensor{LSA,CS}, B::Tensor{CS,RSB}) where {LSA,RSB,CS}
 	# All the right spaces of A contract with all the left spaces of B.
 	# All we need to do is put them in the correct order
-	axes(A, A.rdims) == axes(B, A.ldims) || throw(DimensionMismatch("The right axes of A must be the same as the correponding left axes of B"))
+	axes(A, A.rdims) == axes(B, B.ldims) || throw(DimensionMismatch("The right axes of A must be the same as the correponding left axes of B"))
 
 	szR = (lsize(A)..., rsize(B)...)
 
@@ -1014,7 +1083,26 @@ opnorm(M::Tensor, args...) = begin ensure_square(M); opnorm(Matrix(M), args...);
 eigvals(M::Tensor, args...) = begin ensure_square(M); eigvals(Matrix(M), args...); end
 svdvals(M::Tensor, args...) = svdvals(Matrix(M), args...)
 
+function eigvecs(M::Tensor{S}, args...) where {S}
+	ensure_square(M)
+	sz = (lsize(M)..., prod(rsize(M)))
+	V = reshape(eigvecs(Matrix(M), args...), sz)
+	return Tensor{S, SpacesInt(1)}(V, M.ldims, (nlspaces(M)+1,))
+end
 
+
+function svd(M::Tensor{LS}, args...) where {LS}
+	ensure_square(M)
+	msize = lsize(M);
+	nsvd = prod(rsize(M))
+	ldims = M.ldims;
+	rdims = (nlspaces(M)+1,)
+	RS = SpacesInt(1) 
+	result = svd(Matrix(M), args...)
+	U = Tensor{LS, RS}(reshape(result.U, (msize..., nsvd)), ldims, rdims)
+	Vt = Tensor{RS, LS}(reshape(result.Vt, (nsvd, msize...)), (1,), ldims .+ 1)
+	return (U = U, S = result.S, Vt = Vt)
+end
 
 #
 # Broadcasting
@@ -1023,10 +1111,10 @@ svdvals(M::Tensor, args...) = svdvals(Matrix(M), args...)
 struct MultiMatrixStyle{S,A,N} <: Broadcast.AbstractArrayStyle{N} end
 MultiMatrixStyle{S,A,N}(::Val{N}) where {S,A,N} = MultiMatrixStyle{S,A,N}()
 
-similar(bc::Broadcasted{MMS}, ::Type{T}) where {MMS<:MultiMatrixStyle{S,A,N}} where {S,N} where {A<:DenseArray} where {T} = similar(Tensor{S,T,N,A}, axes(bc))
+similar(bc::Broadcasted{MMS}, ::Type{T}) where {MMS<:MultiMatrixStyle{S,A,N}} where {S,N} where {A<:SupportedArray} where {T} = similar(Tensor{S,T,N,A}, axes(bc))
 
 BroadcastStyle(::Type{Tensor{S,T,N,A}}) where {S,T,N,A} = MultiMatrixStyle{S,A,N}()
-BroadcastStyle(::Type{Tensor{S,T1,N,A1}}, ::Type{Tensor{S,T2,N,A2}})  where {A1<:DenseArray{T1,N}} where {A2<:DenseArray{T2,N}} where {S,N} where {T1,T2} = MultiMatrixStyle{S, promote_type(A1,A2), N}()
+BroadcastStyle(::Type{Tensor{S,T1,N,A1}}, ::Type{Tensor{S,T2,N,A2}})  where {A1<:SupportedArray{T1,N}} where {A2<:SupportedArray{T2,N}} where {S,N} where {T1,T2} = MultiMatrixStyle{S, promote_type(A1,A2), N}()
 BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, Tensors must have the same dimensions and the same spaces in the same order")
 
 # BroadcastStyle(::Type{BitString{L,N}}) where {L,N} = BitStringStyle{L,N}()

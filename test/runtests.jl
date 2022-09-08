@@ -29,6 +29,7 @@ T = Tensor(randn(2,3,4,5,6), (5,2,3), (10,60));
 S = T[:,2,:,4,:];
 @test spaces(S) == ((5,3), (60,))
 @btime ($T)[:,2,:,4,:];
+@btime AlgebraicTensors.getindex_($T, (:,2,:,4,:));
 
 
 @info "testing transpose"
