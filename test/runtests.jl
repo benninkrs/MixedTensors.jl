@@ -73,4 +73,3 @@ CC = AA*BB;
 
 
 # tr(Matrix(R)) takes only 14 ns.
->>>>>>> indexed_spaces
