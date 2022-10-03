@@ -37,12 +37,12 @@ T = Tensor(randn(2,3,4,5,6), (2,5,3), (1,5));
 S = transpose(T, 5);
 @test spaces(S) == ((2,3,5), (1,5))
 @test size(S) == (2,4,6,5,3)
-@btime transpose($T, 5);		# 
+@btime transpose($T, 5);		# 960 ns
 
 S = transpose(T, (5,2));
 @test spaces(S) == ((3,5), (1,2,5))
 @test size(S) == (4,6,5,2,3)
-@btime transpose($T, (5,2));	# 890 nns
+@btime transpose($T, (5,2));	# 890 ns
 
 
 @info "testing multiplication"
@@ -73,4 +73,4 @@ CC = AA*BB;
 
 
 # tr(Matrix(R)) takes only 14 ns.
->>>>>>> indexed_spaces
+
