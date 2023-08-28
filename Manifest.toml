@@ -85,7 +85,7 @@ version = "0.1.2"
 
 [[deps.SuperTuples]]
 deps = ["StaticArrays"]
-git-tree-sha1 = "a895bd5cf337c019a37a2c1dd61ee8e2b46b640f"
+git-tree-sha1 = "aae9b081771b534823cfc9550af795d070f22e59"
 repo-rev = "master"
 repo-url = "https://github.com/benninkrs/SuperTuples.jl"
 uuid = "2532fb96-5642-438b-b515-97252d17ad77"

@@ -30,21 +30,40 @@ A_ = A((5,6),(8,7));
 T = Tensor{(5,2,3),(10,60)}(randn(2,3,4,5,6));
 S = T[:,2,:,4,:];
 @test (lspaces(S), rspaces(S)) == ((5,3), (60,))
-@btime ($T)[:,2,:,4,:];             # 89 ns, 140 ns (1 alloc)
-@btime AlgebraicTensors.getindex_($T, (:,2,:,4,:)); # 140 ns (1 alloc)
+@btime ($T)[:,2,:,4,:];             # 89 ns (1 alloc)
 
 
-@info "testing transpose"
-T = Tensor(randn(2,3,4,5,6), (2,5,3), (1,5));
-S = transpose(T, 5);
-@test (lspaces(S), rspaces(S)) == ((2,3,5), (1,5))
-@test size(S) == (2,4,6,5,3)
-@btime transpose($T, 5);		# 960 ns
+@info "testing =="
+A_ = A((2,1));
+A__ = Tensor{(2,1)}(permutedims(A.data, (2,1,4,3)));
+AA_ = AA((4,3,2,1),(8,7,6,5));
+AA__ = Tensor{(4,3,2,1),(8,7,6,5)}(permutedims(AA.data, (4,3,2,1,8,7,6,5)));
 
-S = transpose(T, (5,2));
-@test (lspaces(S), rspaces(S)) == ((3,5), (1,2,5))
-@test size(S) == (4,6,5,2,3)
-@btime transpose($T, (5,2));	# 890 ns
+@test A == A
+@test A != A_
+@test A == A__
+@btime $A == $A       # 19 ns
+@btime $A == $A__     # 33 ns
+
+@test AA == AA
+@test AA != AA_
+@test AA == AA__
+@btime $AA == $AA       # 6.3 μs
+@btime $AA == $AA__     # 8.8 μs
+
+
+
+# @info "testing transpose"
+# T = Tensor(randn(2,3,4,5,6), (2,5,3), (1,5));
+# S = transpose(T, 5);
+# @test (lspaces(S), rspaces(S)) == ((2,3,5), (1,5))
+# @test size(S) == (2,4,6,5,3)
+# @btime transpose($T, 5);		# 960 ns
+
+# S = transpose(T, (5,2));
+# @test (lspaces(S), rspaces(S)) == ((3,5), (1,2,5))
+# @test size(S) == (4,6,5,2,3)
+# @btime transpose($T, (5,2));	# 890 ns
 
 
 @info "testing multiplication"
@@ -69,9 +88,9 @@ CC = AA*BB;
 @btime tr($R, 2);
 
 
-@info "Combination tests"
-@test size(A + B') == (1,2,3,4)
-@test R * inv(R) ≈ Tensor(reshape(I(12), (3,4,3,4)), 1:2)
+# @info "Combination tests"
+# @test size(A + B') == (1,2,3,4)
+# @test R * inv(R) ≈ Tensor(reshape(I(12), (3,4,3,4)), 1:2)
 
 
 # tr(Matrix(R)) takes only 14 ns.

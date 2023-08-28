@@ -4,26 +4,28 @@
 Implements tensors of arbitrary dimensionality and size as algebraic objects.
 """
 
-
 #=
 8/20/2023
 	This is a major revision to (1) make getindex type stable and (2) use the new TensorOperation.jl API.
 	I am going to return to the original idea parameterizing the type with tuples for the ordered left and
 	right spaces. Hopefully compiler improvements have made this inferrable now.
-	This should make all types functions fast, but may result in excessive code generation.
+	This should make all typed functions fast, but may result in excessive code generation.
 =#
 
 #=
+COMPLETED:
 Constructors	Done, performant
-getindex()		Done, performant
-setindex!()		Done
-==()				Done
+getindex		Done, performant
+setindex!		Done
+==				Done
 Tensor*Tensor	Done, performant
+trace			Done, performant
 
+ISSUES:
+- eig, ^, and other square operator operations currently give wrong answers if lspaces,
+ rspaces have different orderings
 
 TODO:
-- fix findlspace, findrspaces order of odims
-- trace
 - transpose, adjoint
 - +,-
 - Tensor*Array?
@@ -69,6 +71,10 @@ const Axes{N} = NTuple{N, AbstractUnitRange{<:Integer}}
 const SupportedArray{T,N} = DenseArray{T,N}		# can change this later.  Maybe to StridedArray?
 
 
+# # Can we find a better approach to calc_strides and diagonal_op?
+calc_strides(sz::Dims{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : sz[i-1], Val(N)))
+calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1]) - first(ax[i-1]) + 1, Val(N)))
+@inline calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
 
 # Perform an operation along the diagonal of an array
 # PROBABLY DOESN'T WORK FOR NON-SQUARE TENSORS
@@ -99,7 +105,6 @@ macro diagonal_op(M, Idx, Op)
 		end
 	end
 end
-
 
 
 #--------------------------------
@@ -230,6 +235,8 @@ raxes(M::Tensor) = ntuple(i -> axes(M.data, i + nlspaces(M)), nrspaces(M))
 lspaces_int(M::Tensor) = binteger(SpacesInt, Val(lspaces(M)))
 rspaces_int(M::Tensor) = binteger(SpacesInt, Val(rspaces(M)))
 
+# return the sort order of the spaces.
+# This can be viewed as a map from ordered spaces to axes (with an offset for rperm)
 lperm(M::Tensor) = sortperm(lspaces(M))
 rperm(M::Tensor) = sortperm(rspaces(M))
 
@@ -254,65 +261,6 @@ function show(io::IO, M::Tensor)
 		println(io, ':')
 		Base.print_array(IOContext(io, :compact => true, :typeinfo => eltype(M.data)), M.data)
 	end
-end
-
-
-#-----------------------------------------
-# Comparison
-
-# X and Y have the same spaces
-function ==(X::Tensor, Y::Tensor)
-
-	if nlspaces(X) != nlspaces(Y) || nrspaces(X) != nrspaces(Y)
-		return false
-	end
-
-		# fast comparison if X,Y have same spaces in the same order
-	if lspaces(X) == lspaces(Y) && rspaces(X) == rspaces(Y)
-		return X.data == Y.data
-	end
-
-	XLS_ = lspaces(X)(lperm(X))
-	XRS_ = rspaces(X)(rperm(X))
-	YLS_ = lspaces(Y)(lperm(Y))
-	YRS_ = rspaces(Y)(rperm(Y))
-	
-	 # Comparison if X,Y have the same spaces in different order
-	if XLS_ == YLS_ && XRS_ == YRS_
-		Xdims = (lperm(X)..., (rperm(X) .+ nlspaces(X))...)
-		Ydims = (lperm(Y)..., (rperm(Y) .+ nlspaces(X))...)
-		ax = axes(X)[Xdims]
-	
-		# It is probably possible to do this even faster using a macro
-		Xstrides = calc_strides(axes(X))[Xdims]
-		Ystrides = calc_strides(axes(Y))[Ydims]
-	
-		for ci in CartesianIndices(ax)
-			iX = calc_index(ci, Xstrides)	 # computing the index each time probably costs more than updating the index based on the strides
-			iY = calc_index(ci, Ystrides)
-			if X[iX] != Y[iY]
-				return false
-			end
-		end
-		return true
-	end
-
-	# Different spaces
-	return false
-end
-
-
-# Internal functions to make ensure a Tensor is "square".
-# A Tensor M is *square* if it has the same left and right spaces (in any order)
-# and the corresponding left and right axes are the same.
-# It is "proper" square if it is square and the left and right spaces are in the same order.
-#
-# ensure_square(M) throws an error if M is not square; otherwise it returns nothing
-@inline function ensure_square(M::Tensor)
-	lp = lperm(M)
-	rp = rperm(M)
-	is_square = (lspaces(M)[lp] == rspaces(M)[rp]) && (laxes(M)[lp] == raxes(M)[rp])
-	is_square ? nothing : throw(DimensionMismatch("Tensor is not square"))
 end
 
 
@@ -377,6 +325,146 @@ end
 	M.data[idx...] = S.data
 	M
 end
+
+
+
+#-----------------------------------------
+# Comparison
+
+
+function ==(X::Tensor, Y::Tensor)
+
+	LX = lspaces_int(X)
+	RX = rspaces_int(X)
+	LY = lspaces_int(Y)
+	RY = rspaces_int(Y)
+
+	# Result is false if X,Y have different spaces
+	if (LX != LY) || (RX != RY)
+		return false
+	end
+
+	# Fast comparison if X,Y have same spaces in the same order
+	if lspaces(X) == lspaces(Y) && rspaces(X) == rspaces(Y)
+		return X.data == Y.data
+	end
+
+
+	# Same spaces but different order
+
+	ldimsX =lperm(X)
+	rdimsX =rperm(X) .+ nlspaces(X)
+
+	ldimsY =lperm(Y)
+	rdimsY =rperm(Y) .+ nlspaces(Y)
+
+	# check that corresponding axes in X,Y are the same
+	if !(axes(X.data, ldimsX) == axes(Y.data, ldimsY) && axes(X.data, rdimsX) == axes(Y.data, rdimsY))
+		return false
+	end
+
+	test_array_equality(X.data, Y.data, Val(ldimsX), Val(rdimsX), Val(ldimsY), Val(rdimsY))
+end
+
+
+
+# No checking here.  Assumes X,Y have same spaces with the same sizes, but possibly in different order
+@generated function test_array_equality(X, Y, ::Val{ldimsX}, ::Val{rdimsX}, ::Val{ldimsY}, ::Val{rdimsY}) where {ldimsX, rdimsX, ldimsY, rdimsY}
+	NL = length(ldimsX)
+	NR = length(rdimsX)
+	Xdims = (ldimsX..., rdimsX...) 
+	Ydims = (ldimsY..., rdimsY...) 
+	Xperm = invperm(Xdims)
+	Yperm = invperm(Ydims)
+
+	# determine a not-terrible loop order
+	cost = (ntuple(k->max(ldimsX[k], ldimsY[k]), NL)..., ntuple(k->max(rdimsX[k], rdimsY[k]), NR)...)
+	looporder = sortperm(cost)
+
+	# create symbolic index expressions
+	# i_1,...,i_U index the untraced dimensions (udims)
+	# i_(U+1),...,i_(U+T) index the traced dimensions (tdims1 and tdims2)
+	I = symtuple(:i, 1, NL+NR)
+	IX = I[Xperm]
+	IY = I[Yperm]
+
+	# the loop body
+	loopexpr = quote
+		@inbounds if X[$(IX...)] !== Y[$(IY...)]
+			return false
+		 end
+	end
+
+	# construct nested for loops around the body
+	for loop = 1:(NL+NR)
+		loopindex = looporder[loop]
+		loopvar = numberedsymbol(:i, loopindex)
+        rng = :(axes(X, $(Xdims[loopindex])))
+		loopexpr = quote
+            for $loopvar in $rng
+                $loopexpr
+            end
+        end
+	end
+	
+	# construct the preamble and insert the for loops
+	quote
+		$loopexpr
+		return true
+	end
+end
+
+
+
+# X and Y have the same spaces
+# function ==(X::Tensor, Y::Tensor)
+
+# 	if nlspaces(X) != nlspaces(Y) || nrspaces(X) != nrspaces(Y)
+# 		return false
+# 	end
+
+# 		# fast comparison if X,Y have same spaces in the same order
+# 	if lspaces(X) == lspaces(Y) && rspaces(X) == rspaces(Y)
+# 		return X.data == Y.data
+# 	end
+
+# 	XLS_ = lspaces(X)[lperm(X)]
+# 	XRS_ = rspaces(X)[rperm(X)]
+# 	YLS_ = lspaces(Y)[lperm(Y)]
+# 	YRS_ = rspaces(Y)[rperm(Y)]
+	
+# 	 # Comparison if X,Y have the same spaces in different order
+# 	 # OOPS - This doesn't check for same size!
+# 	if XLS_ == YLS_ && XRS_ == YRS_
+# 		Xdims = (lperm(X)..., (rperm(X) .+ nlspaces(X))...)
+# 		Ydims = (lperm(Y)..., (rperm(Y) .+ nlspaces(X))...)
+# 		ax = axes(X)[Xdims]
+	
+# 		# It is probably possible to do this even faster using a macro
+# 		Xstrides = calc_strides(axes(X))[Xdims]
+# 		Ystrides = calc_strides(axes(Y))[Ydims]
+	
+# 		for ci in CartesianIndices(ax)
+# 			iX = calc_index(ci, Xstrides)	 # computing the index each time probably costs more than updating the index based on the strides
+# 			iY = calc_index(ci, Ystrides)
+# 			# println("iX = $iX, iY = $iY")
+# 			if X[iX] != Y[iY]
+# 				# x = X[iX]
+# 				# y = Y[iY]
+# 				# println("Unequal: X[$iX] = $x, Y[$iY] = $y")
+# 				return false
+# 			end
+# 		end
+# 		return true
+# 	end
+
+# 	# Different spaces
+# 	return false
+# end
+
+
+
+
 
 #-----------------------
 
@@ -535,10 +623,12 @@ function tr(M::Tensor)
 	
 	if lspaces(M) == rspaces(M)
 		ensure_square(M)
-   		s = zero(eltype(M))
 		# this is much faster than using TensorOperations.trace!
+   		s = zero(eltype(M))
    		@diagonal_op M iA s += M.data[iA]
    		return s
+		# return tr(Matrix(M))
+		
 	else
 		(ldims, _) = findlspaces(M, Val(LS))
 		(rdims, _) = findrspaces(M, Val(RS))
@@ -580,15 +670,6 @@ function tr(M::Tensor, ::Val{tspaces}) where {tspaces}
 end
 
 
-
-# helper functions
-numberedsymbol(sym::Symbol, n) = Symbol(sym,'_',n)
-function symtuple(sym, N)
-	elems = ntuple(i -> numberedsymbol(sym, i), N)
-end
-function symtuple(sym, a, b)
-	elems = ntuple(i -> numberedsymbol(sym, i+a-1), b-a+1)
-end
 
 @generated function trace_array(array, ::Val{udims}, ::Val{tdims1}, ::Val{tdims2}) where {udims, tdims1, tdims2}
 	length(tdims1) == length(tdims2) || error("Dimensions to be traced must come in pairs")
@@ -947,6 +1028,26 @@ function *(A::Tensor{lspacesA,cspaces}, B::Tensor{cspaces,rspacesB}) where {lspa
 end
 
 
+#-----------------------------------------------
+# Linear algebraic tensor functions.
+# Most of these are applicable only for "square" tensors, i.e. tensors
+# that have the same left and right spaces (not necessarily in the same order)
+# and have with corresponding axes the same size.
+# A tensor is "proper square" if it is square and the left and right spaces are
+# in the same order.
+
+# TODO: THESE NEED TO ACCOUNT FOR THE ORDER OF SPACES!!
+
+
+# Internal functions to make ensure a Tensor is square.
+# ensure_square(M) throws an error if M is not square; otherwise it returns nothing
+@inline function ensure_square(M::Tensor)
+	lp = lperm(M)
+	rp = rperm(M)
+	is_square = (lspaces(M)[lp] == rspaces(M)[rp]) && (laxes(M)[lp] == raxes(M)[rp])
+	is_square ? nothing : throw(DimensionMismatch("Tensor is not square"))
+end
+
 
 
 
@@ -1019,33 +1120,51 @@ BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, T
 #---------------------------
 # Dimension-foo
 
+# Help functions for generated functions
+
+# Append a number to a symbol
+numberedsymbol(sym::Symbol, n) = Symbol(sym,'_',n)
+
+# Create a tuple of sequentially numbered symbols
+function symtuple(sym, N)
+	elems = ntuple(i -> numberedsymbol(sym, i), N)
+end
+function symtuple(sym, a, b)
+	elems = ntuple(i -> numberedsymbol(sym, i+a-1), b-a+1)
+end
+
+# Determine which elements of a tuple are in another.
+# Returns a Bool tuple of the same size as the input
 function isin(spaces::Dims, ::Val{S}) where {S}
+	S isa SpacesInt || error("S must be a SpacesInt")
 	mask = ntuple(i -> (S & (SpacesInt(1) << (spaces[i]-1))) != SpacesInt(0), length(spaces))
 end
 
-
+# find the dimensions of selected left spaces
+#  sdims = dimensions corresponding to the ordered spaces specified by s
+#  odims = remaining dimensions in original order
 function findlspaces(M::Tensor, ::Val{S}) where {S}
 	MS = binteger(SpacesInt, Val(lspaces(M)))
 	sdims = lperm(M)[findnzbits(S, MS)]
-	odims =oneto(nlspaces(M))[isin(lspaces(M), Val(MS & ~S))]
+	odims =oneto(nlspaces(M))[isin(lspaces(M), Val(~S))]
 	# odims = findnzbits((~S & MS), MS)	# WRONG ORDER!
 	return (sdims, odims)
 end
 
+# find the dimensions of selected right spaces
 function findrspaces(M::Tensor, ::Val{S})  where {S}
 	MS = binteger(SpacesInt, Val(rspaces(M)))
 	sdims = nlspaces(M) .+ rperm(M)[findnzbits(S, MS)]
-	odims = nlspaces(M) .+ oneto(nrspaces(M))[isin(rspaces(M), Val(MS & ~S))]
+	odims = nlspaces(M) .+ oneto(nrspaces(M))[isin(rspaces(M), Val(~S))]
 	# odims = nlspaces(M) .+ findnzbits((~S & MS), MS)	# WRONG ORDER!
 	return (sdims, odims)
 end
 
-
+# Construct a permutation formed by reordering blocks of given sizes
 function blockperm(siz, perm)
 	cumsiz = (0, cumsum(siz[1:end-1])...)
 	_blockperm(siz[perm], cumsiz[perm])
 end
-
 
 _blockperm(siz::Dims{1}, cumsiz::Dims{1}) = ntuple(i -> cumsiz[1] + i, siz[1])
 function _blockperm(siz::Dims, cumsiz::Dims) 
@@ -1054,29 +1173,20 @@ function _blockperm(siz::Dims, cumsiz::Dims)
 end
 
 
-# Compute the dimensions of selected spaces after the others are contracted out
-function remain_dims(dims::Dims{N}, ::Val{S}, ::Val{K}) where {N, S, K}
-	# S and K should be SpacesInts
-	count_ones(S) == N || error("count_ones(S) must equal length(dims)")
-	idims = findnzbits(K, S)
-	kdims = dims[idims]
-	dims_ = sortperm(kdims)		# it infers!
-	# Should be equivalent
-	# dims_ = ntuple(Val(N_)) do i
-	# 	static_fn(0, Val(length(kdims))) do a,j
-	# 		kdims[j] <= kdims[i] ? a+1 : a		
-	# 	end
-	# end
-end
-
-
-
-# Can we find a better approach to calc_strides and diagonal_op?
-calc_strides(sz::Dims{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : sz[i-1], Val(N)))
-calc_strides(ax::Axes{N}) where {N} = cumprod(ntuple(i -> i==1 ? 1 : last(ax[i-1]) - first(ax[i-1]) + 1, Val(N)))
-@inline calc_index(I::CartesianIndex{N}, strides::NTuple{N,Int}) where {N} = 1 + sum((Tuple(I) .- 1) .* strides)
-
-
+# # Compute the dimensions of selected spaces after the others are contracted out
+# function remain_dims(dims::Dims{N}, ::Val{S}, ::Val{K}) where {N, S, K}
+# 	# S and K should be SpacesInts
+# 	count_ones(S) == N || error("count_ones(S) must equal length(dims)")
+# 	idims = findnzbits(K, S)
+# 	kdims = dims[idims]
+# 	dims_ = sortperm(kdims)		# it infers!
+# 	# Should be equivalent
+# 	# dims_ = ntuple(Val(N_)) do i
+# 	# 	static_fn(0, Val(length(kdims))) do a,j
+# 	# 		kdims[j] <= kdims[i] ? a+1 : a		
+# 	# 	end
+# 	# end
+# end
 
 
 end
