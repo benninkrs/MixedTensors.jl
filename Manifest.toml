@@ -2,16 +2,10 @@
 
 julia_version = "1.9.2"
 manifest_format = "2.0"
-project_hash = "7282a9d43222beaddb3112a1cf35b161cc6b1ff9"
+project_hash = "8207240300c02b391a74d7eb6aa311f6a8594c44"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
-
-[[deps.BitIntegers]]
-deps = ["Random"]
-git-tree-sha1 = "abb894fb55122b4604af0d460d3018e687a60963"
-uuid = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
-version = "0.3.0"
 
 [[deps.CompilerSupportLibraries_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -85,11 +79,11 @@ version = "0.1.2"
 
 [[deps.SuperTuples]]
 deps = ["StaticArrays"]
-git-tree-sha1 = "aae9b081771b534823cfc9550af795d070f22e59"
+git-tree-sha1 = "6966c272290c16f5efdcc6c2b1f4a578b5349bc9"
 repo-rev = "master"
 repo-url = "https://github.com/benninkrs/SuperTuples.jl"
 uuid = "2532fb96-5642-438b-b515-97252d17ad77"
-version = "0.3.7"
+version = "0.3.8"
 
 [[deps.TensorOperations]]
 deps = ["LRUCache", "LinearAlgebra", "Strided", "TupleTools", "VectorInterface"]

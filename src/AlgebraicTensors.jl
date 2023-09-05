@@ -13,13 +13,34 @@ Implements tensors of arbitrary dimensionality and size as algebraic objects.
 =#
 
 #=
+- In A+B and A-B, the order of spaces is that of A
+- In A*B, the left spaces of A precede the uncontracted left spaces of B,
+	followed by the uncontracted right spaces of A, then right spaces of B.
+	When applying a tensor operator to a tensor vector, the order of spaces
+	in the vector will be changed.  This is sort of undesirable ... ?
+=#
+
+
+#=
 COMPLETED:
-Constructors	Done, performant
-getindex		Done, performant
-setindex!		Done
-==				Done
-Tensor*Tensor	Done, performant
-trace			Done, performant
+Constructors			Done, performant
+getindex					Done, performant
+setindex!				Done, performant
+==							Done, performant
++,-						Done, performant (but can be better)
+adjoint					Done, performant
+transpose				Done, performant
+partial transpose		Done, performant
+Tensor*Tensor			Done, performant
+trace						Done, performant
+partial trace			Done, performant
+analytic funcs			Done, performant
+det						Done, performant
+opnorm					Done, performant
+eigvals					Done, performant
+svdvals					Done, performant
+eig						Done, performant
+svd						Dome, performant
 
 ISSUES:
 - eig, ^, and other square operator operations currently give wrong answers if lspaces,
@@ -27,7 +48,7 @@ ISSUES:
 
 TODO:
 - transpose, adjoint
-- +,-
+- Implement IndexLinear versions for +,-,== (will be faster)
 - Tensor*Array?
 - broadcasting
 - lazy tensor products
@@ -39,15 +60,16 @@ TODO:
 module AlgebraicTensors
 
 export Tensor, lsize, rsize, spaces, lspaces, rspaces, nlspaces, nrspaces
-export marginal
-export tr, eigvals, svdvals, opnorm
-export tr_jutho, tr_mine
+export tr, marginal, det, opnorm, eigvals, eigvecs, svdvals, svd, opnorm
+
+export tensor_op
 
 using MiscUtils
 using SuperTuples
 using StaticArrays
 using LinearAlgebra
 using TensorOperations: Index2Tuple, tensortrace, tensorcontract, tensoradd, tensorscalar
+
 using Base.Broadcast: Broadcasted, BroadcastStyle
 import Base: display, show
 import Base: ndims, length, size, axes, similar, tail
@@ -57,7 +79,7 @@ import Base: getindex, setindex!
 using Base: tail
 import Base: (+), (-), (*), (/), (^)
 import Base: inv, exp, log, sin, cos, tan, sinh, cosh, tanh
-import LinearAlgebra: tr, eigvals, svdvals, opnorm, eigvecs, svd
+import LinearAlgebra: tr, det, eigvals, svdvals, opnorm, eigvecs, svd
 
 
 
@@ -65,6 +87,7 @@ import LinearAlgebra: tr, eigvals, svdvals, opnorm, eigvecs, svd
 # Definitions
 
 const SpacesInt = UInt128  		# An integer treated as a bit set for vector spaces
+const MaxSpace = 	128				# number of bits in SpacesInt (maximum space index)
 const Spaces{N} = Tuple{Vararg{Integer,N}}
 const Iterable = Union{Tuple, AbstractArray, UnitRange, Base.Generator}
 const Axes{N} = NTuple{N, AbstractUnitRange{<:Integer}}
@@ -107,6 +130,8 @@ macro diagonal_op(M, Idx, Op)
 end
 
 
+
+
 #--------------------------------
 # Constructors
 
@@ -142,9 +167,8 @@ struct Tensor{LS, RS, T, N, A<:SupportedArray{T,N}} <: SupportedArray{T,N}
 			LS = isa(LS_, Dims) ? LS_ : tuple(LS_...)
 			RS = isa(RS_, Dims) ? RS_ : tuple(RS_...)
 
-			nbits = sizeof(SpacesInt)*8
-			all(LS .> 0) && all(LS .<= nbits) || error("Values of LSPACES must be integer between 1 and $nbits")
-			all(RS .> 0) && all(RS .<= nbits) || error("Values of RSPACES must be integer between 1 and $nbits")
+			all(LS .> 0) && all(LS .<= MaxSpace) || error("Values of LSPACES must be integer between 1 and $nbits")
+			all(RS .> 0) && all(RS .<= MaxSpace) || error("Values of RSPACES must be integer between 1 and $nbits")
 			LSint = binteger(SpacesInt, Val(LS))
 			RSint = binteger(SpacesInt, Val(RS))
 			NL = length(LS)
@@ -161,21 +185,22 @@ struct Tensor{LS, RS, T, N, A<:SupportedArray{T,N}} <: SupportedArray{T,N}
 
 	# Construct from Arrays whose type is not intrinsically supported
 	Tensor{LS,RS}(data::AbstractArray; validate = true) where {LS,RS} = Tensor{LS,RS}(collect(data); validate)
-
-	# # Shortcut constructor: construct from array, using another Tensor's metadata.
-	# # By ensuring the array has the right number of dimensions, no input checking is needed.
-	# function Tensor(arr::A_, M::Tensor{LS,RS,T,N,A,NL,NR}) where {A_ <: SupportedArray{T_,N}} where {T_} where {LS,RS,T,N,A,NL,NR}
-	# 	return new{LS,RS,T_,N,A_,NL,NR}(arr, M.lspaces, M.rspaces)
-	# end
-
 end
 
 
 
 # Convenience constructors
-
 Tensor{LS}(arr) where {LS} = Tensor{LS, LS}(arr)
 Tensor(arr) = Tensor{oneto(ndims(arr)), ()}(arr)
+
+# Construct from an array, using another Tensor's metadat.
+	# # Shortcut constructor: construct from array, using another Tensor's metadata.
+	# # By ensuring the array has the right number of dimensions, no input checking is needed.
+	
+function Tensor(arr, M::Tensor{LS,RS}) where {LS,RS}
+	ndims(arr) == ndims(M) || error("Array must have the same number of dimensions as the template tensor")
+	Tensor{LS,RS}(arr; validate = false)
+end
 
 
 # Reconstruct Tensor with different spaces
@@ -237,9 +262,12 @@ rspaces_int(M::Tensor) = binteger(SpacesInt, Val(rspaces(M)))
 
 # return the sort order of the spaces.
 # This can be viewed as a map from ordered spaces to axes (with an offset for rperm)
-lperm(M::Tensor) = sortperm(lspaces(M))
-rperm(M::Tensor) = sortperm(rspaces(M))
+# lperm(M::Tensor) = sortperm(lspaces(M))
+# rperm(M::Tensor) = sortperm(rspaces(M))
 
+# the dimensions of the sorted left and right spaces 
+lspace_dims(M::Tensor) = sortperm(lspaces(M))
+rspace_dims(M::Tensor) = nlspaces(M) .+ sortperm(rspaces(M))
 
 arraytype(::Tensor{LS,RS,T,N,A} where {LS,RS,T,N}) where A = A
 
@@ -331,6 +359,8 @@ end
 #-----------------------------------------
 # Comparison
 
+# Fast comparison if X,Y have same spaces in the same order
+==(X::Tensor{LS,RS}, Y::Tensor{LS,RS}) where {LS,RS} = (X.data == Y.data)
 
 function ==(X::Tensor, Y::Tensor)
 
@@ -344,19 +374,13 @@ function ==(X::Tensor, Y::Tensor)
 		return false
 	end
 
-	# Fast comparison if X,Y have same spaces in the same order
-	if lspaces(X) == lspaces(Y) && rspaces(X) == rspaces(Y)
-		return X.data == Y.data
-	end
-
-
 	# Same spaces but different order
 
-	ldimsX =lperm(X)
-	rdimsX =rperm(X) .+ nlspaces(X)
+	ldimsX = lspace_dims(X)
+	rdimsX = rspace_dims(X)
 
-	ldimsY =lperm(Y)
-	rdimsY =rperm(Y) .+ nlspaces(Y)
+	ldimsY = lspace_dims(Y)
+	rdimsY = rspace_dims(Y)
 
 	# check that corresponding axes in X,Y are the same
 	if !(axes(X.data, ldimsX) == axes(Y.data, ldimsY) && axes(X.data, rdimsX) == axes(Y.data, rdimsY))
@@ -398,7 +422,7 @@ end
 	# construct nested for loops around the body
 	for loop = 1:(NL+NR)
 		loopindex = looporder[loop]
-		loopvar = numberedsymbol(:i, loopindex)
+		loopvar = Symbol(:i, '_', loopindex)
         rng = :(axes(X, $(Xdims[loopindex])))
 		loopexpr = quote
             for $loopvar in $rng
@@ -416,53 +440,79 @@ end
 
 
 
-# X and Y have the same spaces
-# function ==(X::Tensor, Y::Tensor)
 
-# 	if nlspaces(X) != nlspaces(Y) || nrspaces(X) != nrspaces(Y)
+# # Version where the index permutation is determined at run-time.
+# # This is much slower.
+
+# function isequal_(X::Tensor, Y::Tensor)
+
+# 	LX = lspaces_int(X)
+# 	RX = rspaces_int(X)
+# 	LY = lspaces_int(Y)
+# 	RY = rspaces_int(Y)
+
+# 	# Result is false if X,Y have different spaces
+# 	if (LX != LY) || (RX != RY)
 # 		return false
 # 	end
 
-# 		# fast comparison if X,Y have same spaces in the same order
-# 	if lspaces(X) == lspaces(Y) && rspaces(X) == rspaces(Y)
-# 		return X.data == Y.data
+# 	# Same spaces but different order
+
+# 	ldimsX =lspace_dims(X)
+# 	rdimsX =rspace_dims(X)
+
+# 	ldimsY =lspace_dims(Y)
+# 	rdimsY =rspace_dims(Y)
+
+# 	# check that corresponding axes in X,Y are the same
+# 	if !(axes(X.data, ldimsX) == axes(Y.data, ldimsY) && axes(X.data, rdimsX) == axes(Y.data, rdimsY))
+# 		return false
 # 	end
 
-# 	XLS_ = lspaces(X)[lperm(X)]
-# 	XRS_ = rspaces(X)[rperm(X)]
-# 	YLS_ = lspaces(Y)[lperm(Y)]
-# 	YRS_ = rspaces(Y)[rperm(Y)]
-	
-# 	 # Comparison if X,Y have the same spaces in different order
-# 	 # OOPS - This doesn't check for same size!
-# 	if XLS_ == YLS_ && XRS_ == YRS_
-# 		Xdims = (lperm(X)..., (rperm(X) .+ nlspaces(X))...)
-# 		Ydims = (lperm(Y)..., (rperm(Y) .+ nlspaces(X))...)
-# 		ax = axes(X)[Xdims]
-	
-# 		# It is probably possible to do this even faster using a macro
-# 		Xstrides = calc_strides(axes(X))[Xdims]
-# 		Ystrides = calc_strides(axes(Y))[Ydims]
-	
-# 		for ci in CartesianIndices(ax)
-# 			iX = calc_index(ci, Xstrides)	 # computing the index each time probably costs more than updating the index based on the strides
-# 			iY = calc_index(ci, Ystrides)
-# 			# println("iX = $iX, iY = $iY")
-# 			if X[iX] != Y[iY]
-# 				# x = X[iX]
-# 				# y = Y[iY]
-# 				# println("Unequal: X[$iX] = $x, Y[$iY] = $y")
-# 				return false
-# 			end
-# 		end
-# 		return true
-# 	end
-
-# 	# Different spaces
-# 	return false
+# 	test_array_equality_(X.data, Y.data, ldimsX, rdimsX, ldimsY, rdimsY)
 # end
 
+# @generated function test_array_equality_(X, Y, ldimsX::Dims{NL}, rdimsX::Dims{NR}, ldimsY::Dims{NL}, rdimsY::Dims{NR}) where {NL,NR}
 
+
+# 	# create symbolic index expressions
+# 	# i_1,...,i_U index the untraced dimensions (udims)
+# 	# i_(U+1),...,i_(U+T) index the traced dimensions (tdims1 and tdims2)
+# 	I = Expr(:tuple, symtuple(:i, 1, NL+NR)...)
+
+# 	# the loop body
+# 	loopexpr = quote
+# 		I = $I
+# 		IX = I[Xperm]
+# 		IY = I[Yperm]
+# 		# @inbounds
+# 			if X[IX...] !== Y[IY...]
+# 			return false
+# 		 end
+# 	end
+
+# 	# construct nested for loops around the body
+# 	for loop = 1:(NL+NR)
+# 		loopvar = numberedsymbol(:i, loop)
+#         rng = :(axes(X, Xdims[$loop]))
+# 		loopexpr = quote
+#             for $loopvar in $rng
+#                 $loopexpr
+#             end
+#         end
+# 	end
+	
+# 	# construct the preamble and insert the for loops
+# 	quote
+# 		Xdims = (ldimsX..., rdimsX...) 
+# 		Ydims = (ldimsY..., rdimsY...) 
+# 		Xperm = invperm(Xdims)
+# 		Yperm = invperm(Ydims)
+	
+# 		$loopexpr
+# 		return true
+# 	end
+# end
 
 
 
@@ -511,99 +561,47 @@ end
 
 
 
-# # Partial transpose
-# """
-# 	transpose(tensor, space)
-# 	transpose(tensor, spaces)
-# Toggle the "direction" (left or right) of specified tensor spaces. Any `spaces` that are not
-# present in `tensor` are ignored.  Untransposed spaces and transposed spaces involving both 
-# a left and right version retain their relative order.  Transposed spaces for which there is
-# only a left or only a right side are placed after the other spaces.
-# """
-# transpose(M::Tensor, ts::Int) = transpose(M, Val((ts,)))
-# transpose(M::Tensor, ts::Dims) = transpose(M, Val(ts))
-# function transpose(M::Tensor{LS,RS}, ::Val{tspaces}) where {LS, RS, tspaces}
-# 	NL = nlspaces(M)
-# 	NR = nrspaces(M)
+# Partial transpose
+"""
+	transpose(tensor, space)
+	transpose(tensor, spaces)
+Toggle the "direction" (left or right) of specified tensor spaces. Any `spaces` that are not
+present in `tensor` are ignored.  Transposed spaces are placed after the other spaces.
+"""
+transpose(M::Tensor, ts::Int) = transpose(M, Val((ts,)))
+transpose(M::Tensor, ts::Dims) = transpose(M, Val(ts))
+function transpose(M::Tensor, ::Val{tspaces}) where {tspaces}
+	LS = lspaces_int(M)
+	RS = rspaces_int(M)
+	
+	NL = nlspaces(M)
+	NR = nrspaces(M)
 
-# 	TS = binteger(SpacesInt, Val(tspaces))
-# 	TSL = TS & LS		# transposed spaces on the left side
-# 	TSR = TS & RS		# transposed spaces on the right side
-
-
-# 	if iszero(TSL) && iszero(TSR)
-# 		# nothing to transpose
-# 		return M
-# 	elseif TSL == TS && TSR == TS
-# 		# All the spaces are in both left and right.
-# 		# We just need to permute the dimensions, the spaces stay the same
-
-# 		it_lspaces = findnzbits(TS, LS)		# indices of left spaces to be transposed (in space order)
-# 		it_rspaces = findnzbits(TS, RS)		# indices of right spaces to be transposed (in space order)
-# 		tlperm = lperm(M)[it_lspaces]			# left dimensions to be transposed (in space order)
-# 		trperm = rperm(M)[it_rspaces]		# right dimensions to be transposed (in space order)
-# 		ldims_ = setindex(lperm(M), trperm, it_lspaces)		# the transposed spaces have the same order
-# 		rdims_ = setindex(rperm(M), tlperm, it_rspaces) .+ nlspaces(A)
-# 		arr = permutedims(M.data, (ldims_..., rdims_...))
-# 		return Tensor{LS,RS}(arr, M.lspaces, M.rspaces)
-# 	else
-
-# 		# new left and right spaces
-# 		LS_ = (LS & ~TS) | TSR
-# 		RS_ = (RS & ~TS) | TSL
-# 		NL_ = count_ones(LS_)
-# 		NR_ = count_ones(RS_)
-
-# 		TSB = TSL & TSR		# transposed spaces common to both sides
-# 		TSL = TSL ⊻ TSB		# transposed spaces on left only
-# 		TSR = TSR ⊻ TSB		# transposed spaces on right only
-
-# 		lperm = sortperm(lspaces(M))
-# 		rperm = sortperm(rspaces(M))
-
-# 		ldims = invperm(lspaces(M), lperm)
-# 		rdims = invperm(rspaces(M), rperm)
-
-# 		it_ldims = findnzbits(TSB, LS)		# indices of left spaces to be transposed
-# 		it_rdims = findnzbits(TSB, RS)		# indices of right spaces to be transposed
-
-# 		ldims_ = setindex(ldims, rdims[it_rdims], it_ldims)
-# 		rdims_ = setindex(rdims, ldims[it_ldims], it_rdims)
-
-# 		lperm = ldims_[lperm]
-# 		rperm = rdims_[rperm]
-
-# 		error("RESUME WORK HERE")
-# 		lkeep = findnzbits(LS ⊻ TSL, LS)[lperm]
-# 		rkeep = findnzbits(RS ⊻ TSR, RS)[rperm]
+	TS = binteger(SpacesInt, Val(tspaces))
+	TSL = TS & LS		# transposed spaces on the left side
+	TSR = TS & RS		# transposed spaces on the right side
 
 
-# 		# ik_lspaces = findnzbits(~TSB, LS)		# indices of left spaces to keep as left
-# 		# ik_rspaces = findnzbits(~TSB, RS)		# indices of right spaces to keep as right
+	if iszero(TSL) && iszero(TSR)
+		# nothing to transpose
+		return M
+	else
+		(tldims, oldims) = findlspaces(M, Val(TSL))
+		(trdims, ordims) = findrspaces(M, Val(TSR))
+
+		ldims = (oldims..., trdims...)
+		rdims = (ordims..., tldims...)
+
+		arr = permutedims(M.data,  (ldims..., rdims...))
+
+		lspaces_ = spaces(M)[ldims];
+		rspaces_ = spaces(M)[rdims];
+
+		return Tensor{lspaces_, rspaces_}(arr)
+	end
+end
 
 
-# 		# lsp = findnzbits(LS)
-# 		# rsp = findnzbits(RS)
-
-# 		# lspaces_ = (lsp[ik_lspaces]..., rsp[it_rspaces]...)
-# 		# lperm_ = sortperm(lspaces_)
-# 		# ldims_ = (M.ldims[ik_lspaces]..., M.rdims[it_rspaces]...)		# dims of the new left spaces
-# 		# lperm = ldims_[lperm_];
-
-# 		# rspaces_ = (rsp[ik_rspaces]..., lsp[it_lspaces]...)
-# 		# rperm_ = sortperm(rspaces_)
-# 		# rperm = (M.rdims[ik_rspaces]..., M.ldims[it_lspaces]...)[rperm_];
-
-# 		perm = (lperm..., rperm...)
-		
-# 		arr = permutedims(M.data, perm)
-# 		return Tensor{LS_,RS_}(arr, oneto(NL_), tupseq(NL_+1, NL_+NR_))
-
-# 	end
-# end
-
-
-# TODO: Resume here
 
 """
 	tr(A)
@@ -642,13 +640,18 @@ end
 
 # Partial trace. Using a keyward would be preferable, but if we did
 # it would overwrite the method that doesn't have the keyword argument.
-tr(M::Tensor, space::Integer) = tr(M, (space,))
+tr(M::Tensor, space::Integer) = tr(M, Val((space,)))
 tr(M::Tensor, spaces::Dims) = tr(M, Val(spaces))
 function tr(M::Tensor, ::Val{tspaces}) where {tspaces}
 	LS = lspaces_int(M)
 	RS = rspaces_int(M)
-	S = binteger(SpacesInt, Val(tspaces))
-
+	if tspaces isa SpacesInt
+		S = tspaces
+	elseif tspaces isa Dims
+		S = binteger(SpacesInt, Val(tspaces))
+	else
+		error("invalid argument")
+	end
 
 	TLS = LS & S
 	TRS = RS & S
@@ -697,7 +700,7 @@ end
 	# construct nested for loops around the body
 	for loop = 1:(T+U)
 		loopindex = looporder[loop]
-		loopvar = numberedsymbol(:i, loopindex)
+		loopvar =Symbol(:i, '_', loopindex)
         rng = :(axes(array, $(p[loopindex])))
 		loopexpr = quote
             for $loopvar in $rng
@@ -717,57 +720,59 @@ end
 end
 
 
-# Implementation using TensorOperations (slower)
-function tr_(M::Tensor)
-	LS = lspaces_int(M)
-	RS = rspaces_int(M)
-	LS == RS || error("To trace a tensor, it must have matching left and right spaces")
+# # Implementation using TensorOperations (slower)
+# function tr_(M::Tensor)
+# 	LS = lspaces_int(M)
+# 	RS = rspaces_int(M)
+# 	LS == RS || error("To trace a tensor, it must have matching left and right spaces")
 	
-	(ldims, _) = findlspaces(M, Val(LS))
-	(rdims, _) = findrspaces(M, Val(RS))
-	return tensorscalar(tensortrace(((),()), M.data, (ldims, rdims), :N))
-end
-
-tr_(M::Tensor, space::Integer) = tr_(M, (space,))
-tr_(M::Tensor, spaces::Dims) = tr_(M, Val(spaces))
-function tr_(M::Tensor, ::Val{tspaces}) where {tspaces}
-	LS = lspaces_int(M)
-	RS = rspaces_int(M)
-	S = binteger(SpacesInt, Val(tspaces))
-
-
-	TLS = LS & S
-	TRS = RS & S
-	 
-	TLS == TRS || error("Invalid spaces to be traced")
-	
-	TS = TLS
-	(ldims, uldims) = findlspaces(M, Val(TS))
-	(rdims, urdims) = findrspaces(M, Val(TS))
-
-	data_ = tensortrace((uldims, urdims), M.data, (ldims, rdims), :N)
-	lspaces_ = spaces(M)[uldims]
-	rspaces_ = spaces(M)[urdims]
-	Tensor{lspaces_, rspaces_}(data_; validate = false)
-end
-
-
-
-# """
-# 	marginal(T::Tensor, spaces)
-
-# Trace out all but the specified spaces.
-# """
-# marginal(M::Tensor, space::Integer) = marginal(M, (space,))
-# marginal(M::Tensor, spaces::Dims) = marginal(M, Val(spaces))
-
-# function marginal(M::Tensor{LS,RS}, ::Val{kspaces}) where {LS,RS,kspaces}
-# 	KS = binteger(SpacesInt, Val(kspaces))
-# 	TSL = ~KS & LS
-# 	TSR = ~KS & RS
-# 	TSL == TSR || error("trace would act upon unequal left and right spaces")
-# 	return tr(M, Val(TSL))
+# 	(ldims, _) = findlspaces(M, Val(LS))
+# 	(rdims, _) = findrspaces(M, Val(RS))
+# 	return tensorscalar(tensortrace(((),()), M.data, (ldims, rdims), :N))
 # end
+
+# tr_(M::Tensor, space::Integer) = tr_(M, (space,))
+# tr_(M::Tensor, spaces::Dims) = tr_(M, Val(spaces))
+# function tr_(M::Tensor, ::Val{tspaces}) where {tspaces}
+# 	LS = lspaces_int(M)
+# 	RS = rspaces_int(M)
+# 	S = binteger(SpacesInt, Val(tspaces))
+
+
+# 	TLS = LS & S
+# 	TRS = RS & S
+	 
+# 	TLS == TRS || error("Invalid spaces to be traced")
+	
+# 	TS = TLS
+# 	(ldims, uldims) = findlspaces(M, Val(TS))
+# 	(rdims, urdims) = findrspaces(M, Val(TS))
+
+# 	data_ = tensortrace((uldims, urdims), M.data, (ldims, rdims), :N)
+# 	lspaces_ = spaces(M)[uldims]
+# 	rspaces_ = spaces(M)[urdims]
+# 	Tensor{lspaces_, rspaces_}(data_; validate = false)
+# end
+
+
+
+"""
+	marginal(T::Tensor, spaces)
+
+Trace out all but the specified spaces.
+"""
+marginal(M::Tensor, space::Integer) = marginal(M, Val((space,)))
+marginal(M::Tensor, spaces::Dims) = marginal(M, Val(spaces))
+
+function marginal(M::Tensor, ::Val{kspaces}) where {kspaces}
+	LS = lspaces_int(M)
+	RS = rspaces_int(M)
+	KS = binteger(SpacesInt, Val(kspaces))
+	TSL = ~KS & LS
+	TSR = ~KS & RS
+	TSL == TSR || error("trace would act upon unequal left and right spaces")
+	return tr(M, Val(TSL))
+end
 
 
 
@@ -811,74 +816,84 @@ end
 #
 
 
+function ensure_same_spaces(A::Tensor, B::Tensor)
+	(lspaces_int(A) == lspaces_int(B)) && (rspaces_int(A) == rspaces_int(B)) ||
+error("A,B must have the same spaces")
+	nothing
+end
 # Addition and subtraction
 
 -(M::Tensor) = Tensor(-M.data, M)
 
-# fallback (for unequal spaces)
-+(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
--(A::Tensor, B::Tensor) = error("Can only add or subtract Tensors with the same spaces")
+
+# fast implementation when A,B have same spaces in same order
++( A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS} = Tensor(A.data + B.data, A)
+-( A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS} = Tensor(A.data - B.data, A)
+
+# A,B have different spaces, or same spaces in different order
+function +(A::Tensor, B::Tensor)
+	ensure_same_spaces(A,B)
+
+	# Same spaces in different order
+	Adims = (lspace_dims(A)..., rspace_dims(A)...)
+	Bdims = (lspace_dims(B)..., rspace_dims(B)...)
+
+	BinA = Bdims[invperm(Adims)]
+
+	return Tensor(permuted_op(+, A.data, B.data, Val(BinA)), A)
+end
 
 
-# function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
-# 	if A.ldims == B.ldims && A.rdims == B.rdims
-# 		# Same spaces in the same order
-# 		return Tensor(A.data + B.data, A)
-# 	else
-# 		# Same spaces in different order
-# 		# Same code as in ==. Should we make a macro?
-# 		Adims = (A.ldims..., A.rdims...)
-# 		Bdims = (B.ldims..., B.rdims...)
 
-# 		BinA = Bdims[invperm(Adims)]
+function -(A::Tensor, B::Tensor)
+	ensure_same_spaces(A,B)
 
-# 		Rdata = A.data + permutedims(B.data, BinA)
-# 		return Tensor(Rdata, A)
-# 	end
-# end
+	# Same spaces in different order
+	Adims = (lspace_dims(A)..., rspace_dims(A)...)
+	Bdims = (lspace_dims(B)..., rspace_dims(B)...)
+
+	BinA = Bdims[invperm(Adims)]
+
+	return Tensor(permuted_op(-, A.data, B.data, Val(BinA)), A)
+end
 
 
-# function -(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
-# 	if A.ldims == B.ldims && A.rdims == B.rdims
-# 		# Same spaces in the same order
-# 		return Tensor(A.data - B.data, A)
-# 	else
-# 		# Same spaces in different order
-# 		# Same code as in ==. Should we make a macro?
-# 		Adims = (A.ldims..., A.rdims...)
-# 		Bdims = (B.ldims..., B.rdims...)
+# this is faster than both Base.+ and Tensoroperations.tensoradd (!)
+@generated function permuted_op(op, A, B, ::Val{perm}) where {perm}
+	N = length(perm)
 
-# 		BinA = Bdims[invperm(Adims)]
+	# determine a not-terrible loop order
+	cost = ntuple(k-> max(k, perm[k]), N)
+	looporder = sortperm(cost)
 
-# 		Rdata = A.data - permutedims(B.data, BinA)
-# 		return Tensor(Rdata, A)
-# 	end
-# end
+	# create symbolic index expressions
+	IA = symtuple(:i, N)
+	IB = IA[perm]
 
-#    # This is slightly slower
-# 	function +(A::Tensor{LS,RS}, B::Tensor{LS,RS}) where {LS,RS}
-#    NL = nlspaces(A)
-#    NR = nrspaces(A)
+	# the loop body
+	loopexpr = quote
+		@inbounds C[$(IA...)] = op(C[$(IA...)], B[$(IB...)])
+	end
 
-#    # Same code as in ==. Should we make a macro?
-#    Adims = (A.ldims..., A.rdims...)
-#    Bdims = (B.ldims..., B.rdims...)
-#    Astrides = calc_strides(axes(A))[Adims]
-#    Bstrides = calc_strides(axes(B))[Bdims]
-
-#    axR = axes(A)
-#    Rtype = promote_type(arraytype(A), arraytype(B))
-#    szR = map(a->last(a)-first(a)+1, axR)
-#    Rdata = Rtype(undef, szR)
-   
-#    @inbounds for ci in CartesianIndices(axR)
-#    	iA = calc_index(ci, Astrides)
-#    	iB = calc_index(ci, Bstrides)
-#    	Rdata[ci] = A[iA] + B[iB]
-#    end
-
-#    return Tensor{LS,RS}(Rdata, oneto(NL), tupseq(NL+1, NL+NR))
-# end
+	# construct nested for loops around the body
+	for loop = 1:N
+		loopindex = looporder[loop]
+		loopvar = Symbol(:i, '_', loopindex)
+        rng = :(axes(A, $loopindex))
+		loopexpr = quote
+            for $loopvar in $rng
+                $loopexpr
+            end
+        end
+	end
+	
+	# construct the preamble and insert the for loops
+	quote
+		C = copy(A)
+		$loopexpr
+		return C
+	end
+end
 
 
 
@@ -1023,6 +1038,7 @@ end
 # faster version when right spaces of A exactly match the left spaces of B
 function *(A::Tensor{lspacesA,cspaces}, B::Tensor{cspaces,rspacesB}) where {lspacesA, rspacesB, cspaces}
 	# The right spaces of A are the same as the left spaces of B
+	axes(A)[rspace_dims(A)] == axes(B)[lspace_dims(B)] || throw(Base.DimensionMismatch("non-matching sizes in contracted dimensions")) 
 	data_= reshape(Matrix(A) * Matrix(B), (lsize(A)..., rsize(B)...))
 	Tensor{lspacesA, rspacesB}(data_)
 end
@@ -1042,62 +1058,122 @@ end
 # Internal functions to make ensure a Tensor is square.
 # ensure_square(M) throws an error if M is not square; otherwise it returns nothing
 @inline function ensure_square(M::Tensor)
-	lp = lperm(M)
-	rp = rperm(M)
-	is_square = (lspaces(M)[lp] == rspaces(M)[rp]) && (laxes(M)[lp] == raxes(M)[rp])
+	ldims = lspace_dims(M)
+	rdims = rspace_dims(M)
+	is_square = (spaces(M)[ldims] == spaces(M)[rdims]) && (axes(M)[ldims] == axes(M)[rdims])
 	is_square ? nothing : throw(DimensionMismatch("Tensor is not square"))
 end
 
 
+# function proper_matrix(M::Tensor)
+# 	ensure_square(M::Tensor)
+# 	ldims = lperm(M)
+# 	rdims = rperm(M) .+ nlspaces(M)
+# 	perm = (ldims..., rdims...)
+# 	data_ = permutedims(M.data, perm)
+# 	matrix = reshape(data_, (prod(lsize(M)), prod(rsize(M))))
+# 	return (matrix, invperm(perm))
+# end
+
+
+# Apply a function to a square tensor
+function matrix_fun(M::Tensor, f::F) where {F}
+	if lspaces(M) == rspaces(M)
+		laxes(M) == raxes(M) || error("Left and right spaces are different sizes")
+		matrix_ = f(Matrix(M))
+		arr_ = reshape(matrix_, size(M))
+		return Tensor(arr_, M)
+	else
+		ldims = lspace_dims(M)
+		rdims = rspace_dims(M)
+		spaces(M)[ldims] == spaces(M)[rdims] || error("Tensor is not square")
+		axes(M)[ldims] == axes(M)[rdims] || error("Left and right spaces are different sizes")
+		
+		perm = (ldims..., rdims...)
+		sz = size(M)[perm]
+		arr = permutedims(M.data, perm)
+		matrix = reshape(arr, (prod(lsize(M)), prod(rsize(M))))
+		matrix_ = f(matrix)
+		arr_ = permutedims(reshape(matrix_, sz), invperm(perm))
+		return Tensor(arr_, M)
+	end
+end
 
 
 # Exponentiation
 
-^(M::Tensor, x::Number) = Tensor(reshape(Matrix(M)^x, size(M)), M)
-^(M::Tensor, x::Integer) = Tensor(reshape(Matrix(M)^x, size(M)), M)
+^(M::Tensor, p::Number) = matrix_fun(M, x -> x^p)
+^(M::Tensor, p::Integer) = matrix_fun(M, x -> x^p)
 
+# ^(M::Tensor, x::Number) = tensor_exp(M, x)
+# ^(M::Tensor, x::Integer) = tensor_exp(M, x)
+# function tensor_exp(M::Tensor, x)
+# 	(matrix, iperm) = proper_matrix(M)
+# 	Tensor(permutedims(reshape(matrix^x, size(M)), iperm), M)
+# end
 
 #
 # Analytic matrix functions
 #
-
 for f in [:inv, :sqrt, :exp, :log, :sin, :cos, :tan, :sinh, :cosh, :tanh]
-	@eval function $f(M::Tensor)
-			ensure_square(M)
-			Tensor(reshape($f(Matrix(M)), size(M)), M)
-		end
+	@eval $f(M::Tensor) = matrix_fun(M, x -> $f(x))
+	# @eval function $f(M::Tensor)
+	# 		(matrix, iperm) = proper_matrix(M)
+	# 		Tensor(permutedims(reshape($f(matrix), size(M)), iperm), M)
+	# 	end
 end
 
+
+#----------- TODO
+
+# Put a tensor's right spaces in the same order as the left spaces, then convert to a matrix
+function propermatrix(M::Tensor)
+	ensure_square(M);
+	if lspaces(M) == rspaces(M)
+		return Matrix(M)
+	else
+		lperm = oneto(nlspaces(M))
+		rperm = rspace_dims(M)[invperm(lspace_dims(M))]
+		pdata = permutedims(M.data, (lperm..., rperm...))
+		return reshape(pdata, (prod(lsize(M)), prod(rsize(M))))
+	end
+end
 
 #
 # Linear-algebra functions
 #
-det(M::Tensor) = begin ensure_square(M); det(Matrix(M)); end
-opnorm(M::Tensor, args...) = begin ensure_square(M); opnorm(Matrix(M), args...); end
+det(M::Tensor) = det(propermatrix(M))
+opnorm(M::Tensor, args...) = opnorm(propermatrix(M), args...)
 
-eigvals(M::Tensor, args...) = begin ensure_square(M); eigvals(Matrix(M), args...); end
-svdvals(M::Tensor, args...) = svdvals(Matrix(M), args...)
+eigvals(M::Tensor, args...) = eigvals(propermatrix(M), args...)
+svdvals(M::Tensor, args...) = svdvals(propermatrix(M), args...)
 
-function eigvecs(M::Tensor{S}, args...) where {S}
-	ensure_square(M)
+function eigvecs(M::Tensor, args...)
 	sz = (lsize(M)..., prod(rsize(M)))
-	V = reshape(eigvecs(Matrix(M), args...), sz)
-	return Tensor{S, SpacesInt(1)}(V, M.ldims, (nlspaces(M)+1,))
+	V = reshape(eigvecs(propermatrix(M), args...), sz)
+	return Tensor{lspaces(M), (MaxSpace,)}(V)
 end
 
 
+"""
+	svd(T::Tensor)
+
+computes the singular value decomposition of tensor `T`.  For technical reasons the result
+cannot be returned as an `SVD` object, but is instead returned as a NamedTuple (:U, :S, :Vt).
+`U`` is a tensor of left singular vectors, with the left spaces of `T` and right space `128`.
+`Vt` is a tensor of right singular vectors, with left space `128` and the right spaces of `T`.
+`S` is a vector of singular values.
+"""
 function svd(M::Tensor{LS}, args...) where {LS}
 	ensure_square(M)
-	msize = lsize(M);
-	nsvd = prod(rsize(M))
-	ldims = M.ldims;
-	rdims = (nlspaces(M)+1,)
-	RS = SpacesInt(1) 
 	result = svd(Matrix(M), args...)
-	U = Tensor{LS, RS}(reshape(result.U, (msize..., nsvd)), ldims, rdims)
-	Vt = Tensor{RS, LS}(reshape(result.Vt, (nsvd, msize...)), (1,), ldims .+ 1)
-	return (U = U, S = result.S, Vt = Vt)
+	nsvd = length(result.S)
+	U_ = Tensor{lspaces(M), (MaxSpace,)}(reshape(result.U, (lsize(M)..., nsvd)))
+	Vt_ = Tensor{(MaxSpace,), rspaces(M)}(reshape(result.Vt, (nsvd, rsize(M)...)))
+	return (U = U_, S = result.S, Vt = Vt_)
 end
+
+
 
 #
 # Broadcasting
@@ -1122,15 +1198,13 @@ BroadcastStyle(::Type{<:Tensor}, ::Type{<:Tensor}) = error("To be broadcasted, T
 
 # Help functions for generated functions
 
-# Append a number to a symbol
-numberedsymbol(sym::Symbol, n) = Symbol(sym,'_',n)
-
 # Create a tuple of sequentially numbered symbols
 function symtuple(sym, N)
-	elems = ntuple(i -> numberedsymbol(sym, i), N)
+	elems = ntuple(i -> Symbol(sym,'_',i), N)
 end
+
 function symtuple(sym, a, b)
-	elems = ntuple(i -> numberedsymbol(sym, i+a-1), b-a+1)
+	elems = ntuple(i -> Symbol(sym,'_',i+a-1), b-a+1)
 end
 
 # Determine which elements of a tuple are in another.
@@ -1145,7 +1219,7 @@ end
 #  odims = remaining dimensions in original order
 function findlspaces(M::Tensor, ::Val{S}) where {S}
 	MS = binteger(SpacesInt, Val(lspaces(M)))
-	sdims = lperm(M)[findnzbits(S, MS)]
+	sdims = lspace_dims(M)[findnzbits(S, MS)]
 	odims =oneto(nlspaces(M))[isin(lspaces(M), Val(~S))]
 	# odims = findnzbits((~S & MS), MS)	# WRONG ORDER!
 	return (sdims, odims)
@@ -1154,7 +1228,7 @@ end
 # find the dimensions of selected right spaces
 function findrspaces(M::Tensor, ::Val{S})  where {S}
 	MS = binteger(SpacesInt, Val(rspaces(M)))
-	sdims = nlspaces(M) .+ rperm(M)[findnzbits(S, MS)]
+	sdims = rspace_dims(M)[findnzbits(S, MS)]
 	odims = nlspaces(M) .+ oneto(nrspaces(M))[isin(rspaces(M), Val(~S))]
 	# odims = nlspaces(M) .+ findnzbits((~S & MS), MS)	# WRONG ORDER!
 	return (sdims, odims)
